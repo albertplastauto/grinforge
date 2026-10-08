@@ -531,6 +531,13 @@ int main(int argc, char** argv) {
         uint64_t localGeneration = 0;
         double   lastSolveSeconds = 0.0;
         bool     jobSeen = false;
+        // The job the CURRENT solve was started for. A graph takes ~18 s while the
+        // pool issues a new job roughly every 60 s, so reading shared.job after the
+        // solve would verify and submit against the WRONG pre_pow: the local
+        // verification would then fail with a misleading message and a genuinely
+        // valid solution would be thrown away.
+        grin::Job activeJob;
+        bool     haveActiveJob = false;
         while (!g_stop.load()) {
             grin::Job job;
             bool have = false;
@@ -550,6 +557,8 @@ int main(int argc, char** argv) {
                 } else {
                     nonce = 0;
                     jobSeen = true;
+                    activeJob = job;
+                    haveActiveJob = true;
                     log_line("new job height=" + std::to_string(job.height) +
                              " job_id=" + std::to_string(job.job_id) +
                              " difficulty=" + std::to_string(job.difficulty));
@@ -601,14 +610,13 @@ int main(int argc, char** argv) {
 
             for (int s = 0; s < nfound; ++s) {
                 shared.solutions.fetch_add(1);
-                // Independent verification before anything is sent to the pool.
+                if (!haveActiveJob) continue;
+
+                // Verify and submit against the job this graph was actually solved
+                // for, never against whatever the newest job happens to be.
                 siphash_keys keys;
                 uint8_t header[GRIN_HEADER_LEN];
-                std::vector<uint8_t> pre;
-                {
-                    std::lock_guard<std::mutex> lock(shared.mutex);
-                    pre = shared.job.pre_pow;
-                }
+                const std::vector<uint8_t>& pre = activeJob.pre_pow;
                 if (pre.size() != GRIN_PRE_POW_SIZE) continue;
                 grin_build_header(pre.data(), pre.size(), out[s].nonce, header);
                 grin::grin_setheader(header, (uint32_t)GRIN_HEADER_LEN, &keys);
@@ -623,19 +631,26 @@ int main(int argc, char** argv) {
                 }
                 if (out[s].cyclehash_leading_zeros < cfg.min_leading_zeros) continue;
 
+                // Note whether a newer job has arrived in the meantime: the pool may
+                // then count the share as stale, which is worth seeing in the log.
+                bool stale = false;
+                {
+                    std::lock_guard<std::mutex> lock(shared.mutex);
+                    stale = shared.has_job && shared.job_generation != localGeneration;
+                }
+
                 grin::Solution sol;
                 sol.nonce = out[s].nonce;
                 sol.edge_bits = EDGEBITS;
                 for (int i = 0; i < PROOFSIZE; ++i) sol.proof[i] = out[s].proof[i];
-                grin::Job submitJob;
-                {
-                    std::lock_guard<std::mutex> lock(shared.mutex);
-                    submitJob = shared.job;
-                }
-                if (get_client()->submit(submitJob, sol)) {
+
+                if (get_client()->submit(activeJob, sol)) {
                     shared.submitted.fetch_add(1);
-                    log_line("submitted solution nonce=" + std::to_string(out[s].nonce) +
-                             " lz=" + std::to_string(out[s].cyclehash_leading_zeros));
+                    log_line("submitted solution height=" + std::to_string(activeJob.height) +
+                             " job_id=" + std::to_string(activeJob.job_id) +
+                             " nonce=" + std::to_string(out[s].nonce) +
+                             " lz=" + std::to_string(out[s].cyclehash_leading_zeros) +
+                             (stale ? " (a newer job has arrived; may be stale)" : ""));
                 } else {
                     log_line("submit queue rejected a solution (not connected?)");
                 }
