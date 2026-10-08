@@ -19,6 +19,19 @@ License**, а она не MIT.
 
 Полный текст: `third_party/tromp-cuckoo/LICENSE.txt`.
 
+### Локальные патчи upstream (минимальны и помечены в коде)
+
+При сборке MSVC выявил два места, которые собираются только GCC/Clang:
+
+| Файл | Патч | Причина |
+|---|---|---|
+| `src/cuckatoo/graph.hpp` | `sizeof(word_t[2*MAXNODES])` → `sizeof(word_t) * 2 * MAXNODES` (и то же для `link[2*MAXEDGES]`, 4 места) | `sizeof(T[n])` с runtime-границей — расширение VLA; MSVC: «expression must have a constant value» |
+| `src/cuckatoo/compress.hpp` | `sizeof(word_t[SIZE])` → `sizeof(word_t) * SIZE` (2 места) | то же |
+| `src/solver/grin_params.hpp` | не определять `NODEBITS` | макрос конфликтует с полем `u32 NODEBITS;` в `compress.hpp`; upstream определяет его *после* `graph.hpp` именно поэтому |
+
+Семантика патчей `sizeof` идентична на всех компиляторах. Правки помечены
+комментариями `LOCAL PATCH (GrinForge, ...)` в самих файлах.
+
 ### Ключевое условие лицензии
 
 > **FAIR MINING**
