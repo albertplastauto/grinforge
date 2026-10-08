@@ -7,7 +7,61 @@
 
 ---
 
-## Текущий статус (9 октября 2026)
+## English summary
+
+**GrinForge** is an open-source **GRIN (Cuckatoo32)** GPU miner for Windows x64 and
+NVIDIA Ada (sm_89), with **zero developer fee**. It contains a lean Cuckatoo32 CUDA
+solver, its own GRIN stratum client, pool failover, a thermal/stall watchdog, NVML
+telemetry and optional GPU control.
+
+It is **verified end to end**: the miner has found Cuckatoo32 cycles, checked each one
+with an independent verifier, submitted them, and had them **accepted by 2miners** — the
+pool's own public API reports our wallet's hashrate and our worker among the active
+miners.
+
+| Miner | Reported hashrate | Power | Accepted shares |
+|---|---|---|---|
+| GMiner 3.44 | 0.07 GPS (self-reported) | 52 W | **0**, while charging a 5% fee |
+| lolMiner 1.98a | does not start | — | — |
+| **GrinForge** | 0.055 GPS local / **0.07 GPS per the pool** | ~70 W | **yes** |
+
+Be realistic about the numbers: on an 8 GB card only the *lean* solver fits (the fast
+*mean* solver needs 20–33 GB), so a few hundredths of a GPS is the ceiling here. Widely
+quoted figures such as "RTX 4060 Ti ≈ 0.65 H/s" are not reachable on 8 GB. GRIN is
+dominated by ASICs; this project is about a correct, transparent, fee-free
+implementation, not about out-earning an ASIC.
+
+Properties worth knowing:
+
+* **The mining process never needs administrator rights.** GPU control flags report
+  refusal with a reason instead of silently doing nothing; the one privileged action is a
+  separate one-shot `--install-gpu-profile`, which exits immediately.
+* **Wallet guard.** `--allow-address` makes the miner refuse to start unless the address
+  it would mine to is exactly the one you intend, so a tampered `.bat` cannot silently
+  redirect your hashrate.
+* **Measured GPU tuning** (`--tune`): hashrate turned out to be independent of every GPU
+  profile tried (±1 %), including halving the core clock. The tuning is documented with
+  numbers rather than advice.
+* **Licence:** MIT, except the solver files derived from `tromp/cuckoo`, which remain
+  under The FAIR MINING License. See [`LICENSE`](LICENSE) and
+  [`docs/third-party.md`](docs/third-party.md).
+
+Quick start:
+
+```bat
+scripts\build_all.bat
+build\cmake\grinforge.exe --pool grin.2miners.com:3030 ^
+    --user <your-grin-wallet>.RIG1 --allow-address <your-grin-wallet>
+```
+
+All validation was done on driver 617.14 / CUDA 13.4 / MSVC 14.51.36231; the exact
+versions and the re-validation procedure are in
+[`docs/validated-environment.md`](docs/validated-environment.md). The detailed technical
+documentation below is in Russian.
+
+---
+
+## Текущий статус (8 октября 2026)
 
 | Компонент | Состояние |
 |---|---|
