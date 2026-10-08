@@ -1,16 +1,16 @@
-# Производительность: замеры, модель стоимости, план оптимизаций
+# Performance: measurements, cost model, optimization plan
 
-Обновлено после исправления конвейера (см. `docs/root-cause.md`).
+Updated after the pipeline fix (see `docs/root-cause.md`).
 
-## 1. Реперные замеры чужих майнеров
+## 1. Baseline measurements of other miners
 
-RTX 4060 Ti 8 GB (8188 MiB), драйвер 617.14 (CUDA UMD 13.4), Windows 11 Pro 26200,
-Ryzen 7 1800X, 32 GB RAM. Пул `grin.2miners.com:3030`, C32.
+RTX 4060 Ti 8 GB (8188 MiB), driver 617.14 (CUDA UMD 13.4), Windows 11 Pro 26200,
+Ryzen 7 1800X, 32 GB RAM. Pool `grin.2miners.com:3030`, C32.
 
-| Майнер | Версия | GPS | VRAM | Питание | Шары за 4.5 мин | Dev fee |
+| Miner | Version | GPS | VRAM | Power | Shares in 4.5 min | Dev fee |
 |---|---|---|---|---|---|---|
-| GMiner | 3.44 | **0.07** | 7759 / 8188 MiB | 46–53 Вт | **0** | **5 %** |
-| lolMiner | 1.98a | **не стартует** | — | — | — | 2 % |
+| GMiner | 3.44 | **0.07** | 7759 / 8188 MiB | 46–53 W | **0** | **5%** |
+| lolMiner | 1.98a | **does not start** | — | — | — | 2% |
 
 ```
 GMiner:  GPU0 PALIT RTX 4060 Ti 8GB: Selected 11GB Solver / DevFee: 5 % / Fidelity: 0.00
@@ -19,59 +19,59 @@ lolMiner: Device 0 Active: false (Unsupported device or driver version.)
           All devices deselected or failed compatiblity check. Closing lolMiner
 ```
 
-GMiner выбрал на 8-гигабайтной карте солвер под 11 ГБ — отсюда 7.7 ГБ занятой VRAM
-и всего 52 Вт при 100 % утилизации. lolMiner отказывается работать: CUDA-путь
-отвергнут драйвером, OpenCL падает на аллокации (C32 mean требует 20–33 ГБ).
+GMiner picked the 11 GB solver on an 8-gigabyte card — hence the 7.7 GB of occupied VRAM
+and only 52 W at 100% utilization. lolMiner refuses to run: the CUDA path is
+rejected by the driver, and OpenCL fails on allocation (C32 mean requires 20–33 GB).
 
-## 2. Собственный солвер: замеры
+## 2. Our own solver: measurements
 
-Собрано MSVC 14.51 + CUDA 13.4 (`-arch=sm_89`), задача живая с пула.
+Built with MSVC 14.51 + CUDA 13.4 (`-arch=sm_89`), with a live job from the pool.
 
-| Конфигурация | trim | поиск циклов | Рёбер после тримминга | Итог |
+| Configuration | trim | cycle search | Edges after trimming | Result |
 |---|---|---|---|---|
-| `ntrims=128 blocks=128 tpb=128` | 16.9 с | 1.2–1.3 с | 1 026 168 | **~0.055 GPS** |
-| `blocks=408` / `816` / `204×256` | 16.6–16.8 с | 0.4–0.5 с | 1 026 168 | без изменений |
+| `ntrims=128 blocks=128 tpb=128` | 16.9 s | 1.2–1.3 s | 1,026,168 | **~0.055 GPS** |
+| `blocks=408` / `816` / `204×256` | 16.6–16.8 s | 0.4–0.5 s | 1,026,168 | no change |
 
-Из рабочего лога майнера (`finder:` строки, 3 графа):
+From the miner's working log (`finder:` lines, 3 graphs):
 
-| Метрика | Значение |
+| Metric | Value |
 |---|---|
-| Рёбер после тримминга | 978 852 … 1 013 870 (в среднем 990 804) |
-| **Узлов с обоими занятыми слотами** | **98.5 %** от числа рёбер |
-| Шагов поиска | в среднем 8.56 млн, максимум 8.77 млн |
-| Достижение лимита шагов (400 млн) | **0 раз** |
+| Edges after trimming | 978,852 … 1,013,870 (average 990,804) |
+| **Nodes with both slots occupied** | **98.5%** of the edge count |
+| Search steps | average 8.56 million, maximum 8.77 million |
+| Step limit (400 million) reached | **0 times** |
 
-Питание: 48–77 Вт, утилизация GPU 100 %, память 33–54 %, температура 48–53 °C.
+Power: 48–77 W, GPU utilization 100%, memory 33–54%, temperature 48–53 °C.
 
-Память устройства: `alive` 512 МиБ + `nonleaf` 512 МиБ = **1 ГиБ** (после возврата
-к однобитному битмапу, `kNodeBits = 1`).
+Device memory: `alive` 512 MiB + `nonleaf` 512 MiB = **1 GiB** (after reverting
+to the one-bit bitmap, `kNodeBits = 1`).
 
-## 3. Что из этого следует
+## 3. What follows from this
 
-1. **Геометрия запуска не влияет вообще** (16.6–16.8 с при изменении числа блоков
-   в 6.4 раза). Упор не в occupancy и не в число потоков.
-2. **14.5 из 16.9 секунд — первые ~16 раундов**, где живы почти все 4.29 млрд
-   рёбер. Оставшиеся 112 раундов стоят ~2 с. Цена сосредоточена там, где граф
-   плотный.
-3. **Память загружена на 33–54 %, а не на 100 %** → упор не в полосу пропускания,
-   а в латентность случайных обращений и в `atomicOr` на битмап `nonleaf`
-   (по одному на каждое живое ребро в каждом раунде).
-4. **Поиск циклов больше не узкое место**: 1.2 с против 16.9 с на тримминг.
-   Лимит шагов не достигается (8.8 млн из 400 млн), то есть бюджет взят с запасом.
-5. **Энергоэффективность пока хуже сломанного GMiner**: ~70 Вт на 0.055 GPS
-   против 52 Вт на 0.07 GPS. По кредо «хешрейт на ватт» это главный аргумент за
-   оптимизацию, а не за косметику.
-6. **Отрицательный результат требует длинного прогона.** Математическое ожидание
-   числа циклов длины `PROOFSIZE` на граф равно `1 / PROOFSIZE` и не зависит от
-   `EDGEBITS`: 1/6 для 6-циклов, **1/42 ≈ 2.4 %** для 42-циклов. При 18 с на граф
-   это в среднем одно решение за ~13 минут. За 24 графа вероятность не увидеть ни
-   одного решения — 56 %.
+1. **Launch geometry has no effect at all** (16.6–16.8 s when the block count
+   changes by 6.4×). The bottleneck is neither occupancy nor thread count.
+2. **14.5 of the 16.9 seconds are the first ~16 rounds**, where almost all
+   4.29 billion edges are alive. The remaining 112 rounds cost ~2 s. The cost is
+   concentrated where the graph is dense.
+3. **Memory is only 33–54% utilized, not 100%** → the bottleneck is not bandwidth
+   but random-access latency and `atomicOr` on the `nonleaf` bitmap
+   (one per live edge in every round).
+4. **Cycle search is no longer the bottleneck**: 1.2 s versus 16.9 s for trimming.
+   The step limit is never reached (8.8 million out of 400 million), so the budget is taken with headroom.
+5. **Energy efficiency is still worse than the broken GMiner**: ~70 W per 0.055 GPS
+   versus 52 W per 0.07 GPS. By the "hashrate per watt" creed, this is the main
+   argument for optimization, not for cosmetics.
+6. **A negative result requires a long run.** The expected number of cycles of
+   length `PROOFSIZE` per graph is `1 / PROOFSIZE` and does not depend on
+   `EDGEBITS`: 1/6 for 6-cycles, **1/42 ≈ 2.4%** for 42-cycles. At 18 s per graph,
+   that is on average one solution per ~13 minutes. Over 24 graphs, the probability
+   of seeing no solution at all is 56%.
 
-## 4. План оптимизаций (по убыванию ожидаемого эффекта)
+## 4. Optimization plan (in descending order of expected effect)
 
-Приоритет 0 — сначала измерить, а не угадывать. Nsight Compute 2026.3.0 установлен
-вместе с CUDA 13.4; профиль стоит снять до любых правок ядер (на время замера
-майнер нужно остановить, иначе он конкурирует за GPU):
+Priority 0 — measure first, don't guess. Nsight Compute 2026.3.0 is installed
+together with CUDA 13.4; the profile is worth capturing before any kernel edits (the
+miner must be stopped during the measurement, otherwise it competes for the GPU):
 
 ```bat
 "C:\Program Files\NVIDIA Corporation\Nsight Compute 2026.3.0\target\windows-desktop-win7-x64\ncu.exe" ^
@@ -79,55 +79,55 @@ GMiner выбрал на 8-гигабайтной карте солвер под
     build\cmake\solver_bench.exe --pre-pow-file build\job.txt --nonce-count 1
 ```
 
-Что искать: `sm__throughput` против `dram__throughput` (латентность или полоса),
-долю времени в `atomic`-операциях и среднее число транзакций на запрос.
+What to look for: `sm__throughput` versus `dram__throughput` (latency or bandwidth),
+the share of time spent in `atomic` operations, and the average number of transactions per request.
 
-### 4.1 Список живых 32-рёберных слов (ожидаемо 1.1–1.3×)
-Поздние раунды (17–128) читают 512 МиБ каждый ради единиц мегабайт полезных
-данных. Компактный список непустых слов убирает этот трафик, но, по замеру,
-поздние раунды стоят всего ~2 с из 16.9 с — выигрыш ограничен.
+### 4.1 List of live 32-edge words (expected 1.1–1.3×)
+The late rounds (17–128) read 512 MiB each for a few megabytes of useful data.
+A compact list of non-empty words removes that traffic, but by measurement the
+late rounds cost only ~2 s out of 16.9 s — so the gain is limited.
 
-### 4.2 Убрать полный `cudaMemset(nonleaf)` на раунд (ожидаемо 1.05×)
-128 раундов × 512 МиБ = 64 ГиБ записи ≈ 0.22 с при 288 ГБ/с. Малый эффект.
+### 4.2 Drop the full `cudaMemset(nonleaf)` per round (expected 1.05×)
+128 rounds × 512 MiB = 64 GiB of writes ≈ 0.22 s at 288 GB/s. Minor effect.
 
-### 4.3 Атаковать плотные раунды — здесь лежит основной резерв
-Раунды 0–16 стоят 14.5 с. Гипотезы, которые надо проверить профилем:
+### 4.3 Attack the dense rounds — that is where the main reserve lies
+Rounds 0–16 cost 14.5 s. Hypotheses to verify with the profiler:
 
-* **`atomicOr` на каждое живое ребро.** 4.29 млрд атомарных операций в раунд 0.
-  Обходные пути: warp-level агрегация; переход на байтовую карту; разбиение
-  раунда на проходы, где запись идёт без атомики.
-* **Случайный доступ к 512-МиБ битмапу.** Транзакции по 32 байта ради 4 байт
-  полезного → эффективность ~12 %. Обходной путь — `PART_BITS > 0`, но Tromp
-  документирует ~33 % замедления, так что это не бесплатный выигрыш.
-* **Совмещение count и kill.** Требует знания полной степени до удаления, поэтому
-  два прохода по живым рёбрам, похоже, неизбежны; но первый раунд, где живы ВСЕ
-  рёбра, можно обрабатывать специализированным ядром без чтения битмапа `alive`
-  и без цикла `ffs`.
+* **`atomicOr` on every live edge.** 4.29 billion atomic operations in round 0.
+  Workarounds: warp-level aggregation; switching to a byte map; splitting the
+  round into passes where the write goes through without atomics.
+* **Random access to the 512-MiB bitmap.** 32-byte transactions for 4 bytes of
+  useful data → ~12% efficiency. The workaround is `PART_BITS > 0`, but Tromp
+  documents a ~33% slowdown, so it is not a free win.
+* **Fusing count and kill.** It requires knowing the full degree before removal,
+  so two passes over the live edges seem unavoidable; but the first round, where ALL
+  edges are alive, can be handled by a specialized kernel without reading the `alive`
+  bitmap and without the `ffs` loop.
 
-### 4.4 `PART_BITS` (память ↔ скорость)
-`PART_BITS=1` вдвое уменьшает `nonleaf` ценой ~33 % замедления. На 8 ГБ память не
-является ограничением (нужно ~1 ГиБ), поэтому `PART_BITS=0` — правильный выбор;
-опция оставлена для карт с малым VRAM.
+### 4.4 `PART_BITS` (memory ↔ speed)
+`PART_BITS=1` halves `nonleaf` at the cost of a ~33% slowdown. On 8 GB, memory is not
+a constraint (~1 GiB is needed), so `PART_BITS=0` is the right choice; the option is kept
+for cards with little VRAM.
 
-### 4.5 Подбор `ntrims`
-`ntrims=128` — значение по умолчанию Tromp для `EDGEBITS=31`; для 32 оно не
-тюнилось (в Makefile upstream нет цели `lcuda32`). Ограничение `MAXEDGES` больше
-не действует: `CycleFinder` сам считает ёмкость своей таблицы и возвращает чистый
-`Overloaded`, если граф в неё не влезает. Значит `ntrims` теперь влияет только на
-баланс «время тримминга против времени поиска», и его можно подбирать замером:
+### 4.5 Tuning `ntrims`
+`ntrims=128` is Tromp's default for `EDGEBITS=31`; for 32 it was never tuned (there is
+no `lcuda32` target in the upstream Makefile). The `MAXEDGES` limit no longer applies:
+`CycleFinder` computes the capacity of its own table itself and returns a clean `Overloaded`
+if the graph does not fit. So `ntrims` now only affects the balance between trimming
+time and search time, and it can be tuned by measurement:
 `--ntrims` 64/96/128/160.
 
-Важно: тримминг **сохраняет циклы на любом числе раундов** (удаляются только
-листья), поэтому уменьшение `ntrims` не теряет решения — оно лишь увеличивает
-граф для поиска.
+Important: trimming **preserves cycles at any number of rounds** (only leaves are
+removed), so reducing `ntrims` does not lose solutions — it only makes the graph
+larger for the search.
 
-### 4.6 Экономика вызовов API
-Работа над проектом ставится на паузу в часы пика цен DeepSeek API (см. README):
-пик — 01:00–04:00 и 06:00–10:00 UTC по будням, то есть 04:00–07:00 и 09:00–13:00 по
-Москве; всё остальное время вдвое дешевле. Это не оптимизация хешрейта, а прямая
-экономия на стоимости разработки.
+### 4.6 Economics of API calls
+Work on the project is paused during DeepSeek API peak-price hours (see README):
+peak is 01:00–04:00 and 06:00–10:00 UTC on weekdays, that is 04:00–07:00 and 09:00–13:00
+Moscow time; at all other times it is half price. This is not a hashrate optimization
+but a direct saving on development cost.
 
-## 5. Обязательные команды проверки
+## 5. Mandatory verification commands
 
 ```bat
 solver_bench.exe --selftest
@@ -137,67 +137,67 @@ solver_bench29.exe    --pre-pow-file build\job.txt --nonce-start 85 --nonce-coun
 solver_bench.exe      --pre-pow-file build\job.txt --nonce-count 100
 ```
 
-Ожидания: первые две — «passed» и «agree»; третья — 5 решений, все `verify=OK`;
-четвёртая — 1 решение на nonce 85 (`lz=3 difficulty=14848`); последняя — около
-100/42 ≈ 2.4 решения, но при p=2.4 % отсутствие решений на 100 графах всё ещё
-имеет вероятность 9 %, поэтому для утверждения «работает» нужен прогон на
-несколько сотен графов.
+Expectations: the first two — "passed" and "agree"; the third — 5 solutions, all `verify=OK`;
+the fourth — 1 solution at nonce 85 (`lz=3 difficulty=14848`); the last — about
+100/42 ≈ 2.4 solutions, but at p=2.4% the absence of solutions over 100 graphs still
+has probability 9%, so a claim that it "works" requires a run over several hundred
+graphs.
 
-## 7. Измеренный подбор режимов GPU (`--tune`)
+## 7. Measured tuning of GPU modes (`--tune`)
 
 ```bat
 grinforge.exe --tune 25 --bench-pre-pow build\job.txt
 ```
 
-Режим применяет по одному профилю, измеряет реальный GPS и среднюю мощность, считает
-GPS/Вт и в конце возвращает значения по умолчанию. Требует прав администратора (иначе
-`nvidia-smi -pl / -lgc` откажут и профиль будет помечен `NOT APPLIED (needs elevation)`)
-и остановленного майнера — иначе они конкурируют за GPU.
+The mode applies one profile at a time, measures actual GPS and average power, computes
+GPS/W, and restores the defaults at the end. It requires administrator rights (otherwise
+`nvidia-smi -pl / -lgc` will fail and the profile will be marked `NOT APPLIED (needs elevation)`)
+and a stopped miner — otherwise they compete for the GPU.
 
-Результаты на RTX 4060 Ti, три независимых прогона, шесть профилей:
+Results on the RTX 4060 Ti, three independent runs, six profiles:
 
-| профиль | GPS | Вт | GPS/Вт |
+| profile | GPS | W | GPS/W |
 |---|---|---|---|
-| stock (2790 МГц, лимит 160 Вт) | 0.0540 | 28.2 | 0.00191 |
-| лимит питания 100 Вт | 0.0542 | 35.1 | 0.00155 |
-| лимит питания 120 Вт | 0.0547 | 40.2 | 0.00136 |
-| **блокировка ядра 1500 МГц** | **0.0497** | 27.0 | 0.00185 |
-| **блокировка ядра 2500 МГц** | 0.0540 | 25.2 | **0.00214** |
-| блокировка ядра 2800 МГц | 0.0548 | 35.0 | 0.00157 |
+| stock (2790 MHz, 160 W limit) | 0.0540 | 28.2 | 0.00191 |
+| power limit 100 W | 0.0542 | 35.1 | 0.00155 |
+| power limit 120 W | 0.0547 | 40.2 | 0.00136 |
+| **core lock 1500 MHz** | **0.0497** | 27.0 | 0.00185 |
+| **core lock 2500 MHz** | 0.0540 | 25.2 | **0.00214** |
+| core lock 2800 MHz | 0.0548 | 35.0 | 0.00157 |
 
-### Выводы
+### Conclusions
 
-1. **Хешрейт не зависит от настроек карты.** Разброс 0.0538–0.0549 (около ±1 %) между
-   всеми профилями — включая снижение частоты ядра почти вдвое. Прямое доказательство,
-   что GPU-часть не упирается ни в частоту, ни в ALU: она latency/atomic-bound.
-2. **Лимит питания бесполезен**: карта потребляет меньше минимального лимита (100 Вт),
-   поэтому ползунок физически не может повлиять на эту нагрузку.
-3. **Лучшая эффективность — блокировка ~2500 МГц**: тот же хешрейт при меньшем
-   потреблении, GPS/Вт примерно на 12 % выше, чем «как есть».
-4. Наблюдение владельца, что разгон памяти +500 МГц не даёт прироста, согласуется с
-   замером: загрузка памяти 33–54 %, алгоритм не bandwidth-bound.
+1. **Hashrate does not depend on the card's settings.** The spread of 0.0538–0.0549 (about ±1%) across
+   all profiles — including a nearly two-fold reduction in core clock — is direct proof
+   that the GPU part is bound neither by frequency nor by ALU: it is latency/atomic-bound.
+2. **The power limit is useless**: the card draws less than the minimum limit (100 W),
+   so the slider physically cannot affect this workload.
+3. **The best efficiency comes from a ~2500 MHz core lock**: the same hashrate at lower
+   consumption, with GPS/W about 12% higher than "as is".
+4. The owner's observation that a +500 MHz memory overclock gives no gain is consistent with the
+   measurement: memory load is 33–54%, and the algorithm is not bandwidth-bound.
 
-Оговорка: столбец мощности шумный (2–4 пробы на профиль), поэтому направление верно, а
-абсолютные ватты оценочны. Столбец GPS устойчив и воспроизводится между прогонами.
+Caveat: the power column is noisy (2–4 samples per profile), so the direction is right while the
+absolute watts are estimates. The GPS column is stable and reproduces across runs.
 
-**Рекомендация:** применять блокировку 2500 МГц **внешним инструментом** (NVIDIA app,
-Afterburner) как постоянный профиль, а майнер держать без прав администратора: выигрыш
-около 12 % эффективности не стоит выдачи майнеру админских прав. Ключ
-`--lock-core <mhz>` добавлен для тех, кто сознательно запускает майнер elevated.
+**Recommendation:** apply the 2500 MHz lock **with an external tool** (NVIDIA app,
+Afterburner) as a permanent profile, and keep the miner running without administrator rights:
+gaining about 12% in efficiency is not worth granting the miner admin rights. The
+`--lock-core <mhz>` flag is provided for those who deliberately run the miner elevated.
 
-### Сверка с внешними оценками
+### Cross-check against external estimates
 
-Встречающаяся в обзорах цифра «RTX 4060 Ti ≈ 0.65 H/s при 120 Вт» на этой карте
-недостижима: 0.65 GPS требуют mean-солвера, которому нужно 20–33 ГБ VRAM, а в 8 ГБ он
-не помещается — это подтверждается отказом lolMiner на этой самой карте
-(`OpenCL init failure: Invalid buffer size`). Наши измеренные 0.054 GPS подтверждаются
-независимо: **сам пул** оценивает наш хешрейт в 0.07 GPS по принятым шарам.
+The "RTX 4060 Ti ≈ 0.65 H/s at 120 W" figure found in reviews is unattainable on this
+card: 0.65 GPS requires a mean solver, which needs 20–33 GB of VRAM, and it does not fit
+into 8 GB — this is confirmed by lolMiner's failure on this very card
+(`OpenCL init failure: Invalid buffer size`). Our measured 0.054 GPS is confirmed
+independently: **the pool itself** estimates our hashrate at 0.07 GPS from accepted shares.
 
-## 6. Прочая экономика
+## 6. Other economics
 
-Сеть GRIN ~3.5–4 kGps, её добывают ASIC (iPollo G1: 36 h/s при 2800 Вт). Одна
-4060 Ti даёт 0.01–0.02 % сети; выручка по WhatToMine порядка $0.16/сутки при
-убытке $0.13 при $0.13/кВт·ч. Проект имеет смысл как инженерный, как
-измерительный стенд и как заявка на bounty Tromp ($10 000 за открытый
-C32-солвер на 1 gps при ≤100·x Вт): 4060 Ti при ~100 Вт должна дать ~1 GPS,
-то есть цель — потолок из раздела 3, пункт 2.
+The GRIN network is ~3.5–4 kGps, mined by ASICs (iPollo G1: 36 h/s at 2800 W). One
+4060 Ti provides 0.01–0.02% of the network; revenue per WhatToMine is on the order of $0.16/day
+at a loss of $0.13 at $0.13/kWh. The project makes sense as an engineering effort, as a
+measurement bench, and as a bid for Tromp's bounty ($10,000 for an open
+C32 solver at 1 gps within ≤100·x W): a 4060 Ti at ~100 W should deliver ~1 GPS,
+that is, the target is the ceiling from section 3, point 2.

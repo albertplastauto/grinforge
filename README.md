@@ -1,13 +1,13 @@
 # GrinForge
 
-Открытый GPU-майнер **GRIN (Cuckatoo32)** для Windows x64 / NVIDIA Ada (sm_89).
-**Без developer fee** — 0 % навсегда.
+Open-source **GRIN (Cuckatoo32)** GPU miner for Windows x64 / NVIDIA Ada (sm_89).
+**No developer fee** — 0% forever.
 
-Целевая машина: RTX 4060 Ti 8 GB, драйвер 617.14 (CUDA UMD 13.4), Windows 11.
+Target machine: RTX 4060 Ti 8 GB, driver 617.14 (CUDA UMD 13.4), Windows 11.
 
 ---
 
-## English summary
+## Overview
 
 **GrinForge** is an open-source **GRIN (Cuckatoo32)** GPU miner for Windows x64 and
 NVIDIA Ada (sm_89), with **zero developer fee**. It contains a lean Cuckatoo32 CUDA
@@ -56,29 +56,28 @@ build\cmake\grinforge.exe --pool grin.2miners.com:3030 ^
 
 All validation was done on driver 617.14 / CUDA 13.4 / MSVC 14.51.36231; the exact
 versions and the re-validation procedure are in
-[`docs/validated-environment.md`](docs/validated-environment.md). The detailed technical
-documentation below is in Russian.
+[`docs/validated-environment.md`](docs/validated-environment.md).
 
 ---
 
-## Текущий статус (8 октября 2026)
+## Current status (8 October 2026)
 
-| Компонент | Состояние |
+| Component | State |
 |---|---|
-| Сборка MSVC 14.51 + CUDA 13.4 + sm_89 | ✅ работает, 6 исполняемых файлов |
-| Заголовок GRIN → ключи siphash | ✅ проверено двумя независимыми реализациями на Python |
-| device- и host-siphash | ✅ 0 расхождений из 64, плюс сверка на всех 2^20 рёбрах |
-| Модель узла Cuckatoo (`sipnode>>1` + слот чётности) | ✅ подтверждена консенсус-вектором GRIN `V1_32` |
-| Тримминг (правило partner-slot) | ✅ совпадает с CPU-репликацией логики ядра по каждому nonce |
-| Поиск циклов | ✅ **найдены и проверены реальные решения**: 6-циклы (C20/P6) и 42-циклы (C29/P42) |
-| Стратум-клиент | ✅ проверен на живом 2miners: login, job 238 байт, keepalive |
-| Failover, watchdog (термогард, детект зависания) | ✅ реализованы |
-| Телеметрия NVML | ✅ живые температура, кулер, мощность, частоты, VRAM |
-| Управление картой | ⚠️ power limit требует прав администратора; undervolt на этой карте **невозможен** (`numBaseVoltages=0`); кулер через NVAPI драйвер блокирует |
-| Скорость | ⚠️ **~0.055 GPS** локально при ~70 Вт; пул оценивает нас в **0.07 GPS** |
-| **Принятая пулом шара** | ✅ **ЕСТЬ** — см. доказательства ниже |
+| MSVC 14.51 + CUDA 13.4 + sm_89 build | ✅ works, 6 executables |
+| GRIN header → siphash keys | ✅ verified against two independent Python implementations |
+| device- and host-siphash | ✅ 0 mismatches out of 64, plus a cross-check over all 2^20 edges |
+| Cuckatoo node model (`sipnode>>1` + parity slot) | ✅ confirmed by the GRIN consensus vector `V1_32` |
+| Trimming (partner-slot rule) | ✅ matches a CPU replica of the kernel logic for every nonce |
+| Cycle search | ✅ **real solutions found and verified**: 6-cycles (C20/P6) and 42-cycles (C29/P42) |
+| Stratum client | ✅ verified against a live 2miners: login, 238-byte job, keepalive |
+| Failover, watchdog (thermal guard, stall detection) | ✅ implemented |
+| NVML telemetry | ✅ live temperature, fan, power, clocks, VRAM |
+| GPU control | ⚠️ power limit requires administrator rights; undervolt on this card is **impossible** (`numBaseVoltages=0`); the driver blocks the fan via NVAPI |
+| Hashrate | ⚠️ **~0.055 GPS** locally at ~70 W; the pool estimates us at **0.07 GPS** |
+| **Share accepted by the pool** | ✅ **YES** — see the evidence below |
 
-### Доказательство работоспособности (сквозное)
+### Proof that it works (end to end)
 
 ```
 [21:04:17.168] submitted solution height=4053661 job_id=0 nonce=0 lz=1
@@ -86,78 +85,77 @@ documentation below is in Russian.
 [21:04:17.262] submit accepted by the pool
 ```
 
-Локальный счётчик: `sol=1 sub=1 acc=1 rej=0 stale=0`.
+Local counter: `sol=1 sub=1 acc=1 rej=0 stale=0`.
 
-Независимое подтверждение со стороны пула — публичный API
-`https://grin.2miners.com/api/accounts/<кошелёк>`:
+Independent confirmation from the pool side — the public API
+`https://grin.2miners.com/api/accounts/<wallet>`:
 
 ```
 currentHashrates -> {"32":0.07}
 hashrates        -> {"32":0.07}
 ```
 
-и наш воркер присутствует в `https://grin.2miners.com/api/miners` среди активных
-майнеров. То есть путь «нашли цикл → проверили → отправили → пул зачёл» замкнут
-целиком, а не только по нашей стороне.
+and our worker is present in `https://grin.2miners.com/api/miners` among the active
+miners. In other words, the whole path "found a cycle → verified it → submitted it → the
+pool credited it" is closed end to end, not only on our side.
 
 
-**Ожидаемая частота решений.** Математическое ожидание числа циклов длины
-`PROOFSIZE` на граф равно **1 / PROOFSIZE** и не зависит от `EDGEBITS`: 1/6 для
-6-циклов, **1/42 ≈ 2.4 %** для 42-циклов. При ~18.5 с на граф это в среднем одно
-решение примерно за 13 минут, поэтому отсутствие решений на коротких прогонах
-ничего не доказывает (за 24 графа вероятность не увидеть ни одного — 56 %).
+**Expected solution rate.** The expected number of cycles of length `PROOFSIZE` in a
+graph is **1 / PROOFSIZE** and does not depend on `EDGEBITS`: 1/6 for 6-cycles,
+**1/42 ≈ 2.4 %** for 42-cycles. At ~18.5 s per graph that averages out to one solution
+roughly every 13 minutes, so the absence of solutions over short runs proves nothing
+(over 24 graphs the probability of seeing none is 56 %).
 
-Наблюдённые подтверждения: 7 решений на 24 графах при C20/P6 и 4 решения на
-170 графах при C29/P42, все прошли `grin_verify`.
+Observed confirmations: 7 solutions over 24 graphs at C20/P6 and 4 solutions over 170
+graphs at C29/P42, all of which passed `grin_verify`.
 
 
 ---
 
-## Зачем этот проект
+## Why this project exists
 
-Замеры на целевой карте 8 октября 2026 показали, что готовые майнеры на ней
-фактически не работают:
+Measurements on the target card on 8 October 2026 showed that off-the-shelf miners
+effectively do not work on it:
 
-| Майнер | Результат на RTX 4060 Ti 8 GB |
+| Miner | Result on RTX 4060 Ti 8 GB |
 |---|---|
-| GMiner 3.44 | выбрал «11GB Solver», **0.07 GPS**, 7759/8188 MiB VRAM, 0 шар за 4.5 мин, 52 Вт, dev fee **5 %** |
-| lolMiner 1.98a | **не запускается**: CUDA-устройство «Unsupported device or driver version», OpenCL «Invalid buffer size» |
-| «Софт от пула» (`Setup (2).zip`) | побайтово тот же GMiner 3.44 (`SHA256 9EC744DD…`); для GRIN вызывает lolMiner, который на этой карте не стартует |
+| GMiner 3.44 | picked the "11GB Solver", **0.07 GPS**, 7759/8188 MiB VRAM, 0 shares in 4.5 min, 52 W, dev fee **5 %** |
+| lolMiner 1.98a | **does not start**: CUDA device "Unsupported device or driver version", OpenCL "Invalid buffer size" |
+| "Pool-provided software" (`Setup (2).zip`) | byte-for-byte the same GMiner 3.44 (`SHA256 9EC744DD…`); for GRIN it launches lolMiner, which will not start on this card |
 
-Причина в том, что Cuckatoo32-солверы «mean» требуют 20–33 ГБ VRAM
-(официальный `grin-miner.toml`: «the C32 reference miner requires 20GB of memory»,
-абсолютный минимум по документации — 24.8 ГБ). На 8 ГБ помещается только
-**lean**-солвер (~1 ГБ).
+The reason is that "mean" Cuckatoo32 solvers need 20–33 GB of VRAM (the official
+`grin-miner.toml`: "the C32 reference miner requires 20GB of memory"; the absolute minimum
+in the documentation is 24.8 GB). On 8 GB only the **lean** solver fits (~1 GB).
 
-## Что внутри
+## What is inside
 
-| Компонент | Путь | Состояние |
+| Component | Path | State |
 |---|---|---|
-| CUDA lean-солвер C32 (порт `lean.cu` Tromp) | `src/solver/` | собирается, требует toolkit |
-| Независимый верификатор доказательств | `src/solver/grin_verify.hpp` | проверен |
-| Стратум-клиент GRIN | `src/stratum/` | спецификация проверена на живом пуле |
-| Телеметрия (NVML) и управление картой (NVAPI) | `src/monitor/` | в работе |
-| Host-цикл, watchdog, failover, дашборд | `src/host/main.cpp` | написан |
-| Спецификация протокола стратума | `docs/stratum-protocol.md` | проверена эмпирически |
+| CUDA lean C32 solver (port of Tromp's `lean.cu`) | `src/solver/` | builds, requires the toolkit |
+| Independent proof verifier | `src/solver/grin_verify.hpp` | verified |
+| GRIN stratum client | `src/stratum/` | specification verified against a live pool |
+| Telemetry (NVML) and GPU control (NVAPI) | `src/monitor/` | in progress |
+| Host loop, watchdog, failover, dashboard | `src/host/main.cpp` | written |
+| Stratum protocol specification | `docs/stratum-protocol.md` | verified empirically |
 
-## Сборка
+## Building
 
-> **Проверенная среда зафиксирована.** Все результаты в этом файле получены на
-> драйвере **617.14**, CUDA **13.4** (V13.4.59) и MSVC **14.51.36231**. Точные версии,
-> перечень проверенного и набор команд для перепроверки — в
-> [`docs/validated-environment.md`](docs/validated-environment.md). Сменился драйвер,
-> CUDA или компилятор — прогоните проверку заново.
+> **The validated environment is pinned.** Every result in this file was obtained on
+> driver **617.14**, CUDA **13.4** (V13.4.59) and MSVC **14.51.36231**. The exact
+> versions, the list of what was validated and the command set for re-checking are in
+> [`docs/validated-environment.md`](docs/validated-environment.md). If the driver,
+> CUDA or the compiler changes, run the validation again.
 
-Требуется: Visual Studio 2026 с workload «Desktop development with C++»,
-CUDA Toolkit 13.x, CMake ≥ 3.24 (идёт в поставке VS).
+Requirements: Visual Studio 2026 with the "Desktop development with C++" workload,
+CUDA Toolkit 13.x, CMake ≥ 3.24 (ships with VS).
 
-Одной командой (поправьте `VSDIR` / `CUDAROOT` внутри, если у вас другие пути):
+One command (edit `VSDIR` / `CUDAROOT` inside it if your paths differ):
 
 ```bat
 scripts\build_all.bat
 ```
 
-Вручную:
+Manually:
 
 ```bat
 cmake -S . -B build\cmake -G Ninja ^
@@ -166,178 +164,178 @@ cmake -S . -B build\cmake -G Ninja ^
 cmake --build build\cmake
 ```
 
-Артефакты в `build\cmake\`: `grinforge.exe` (майнер), `solver_bench.exe` (замер GPS и
-самопроверка), `solver_bench_tiny.exe` / `solver_bench29.exe` (окна поиска циклов),
-`stratum_client_test.exe` (живая проверка протокола).
+Artifacts in `build\cmake\`: `grinforge.exe` (the miner), `solver_bench.exe` (GPS
+measurement and self-check), `solver_bench_tiny.exe` / `solver_bench29.exe` (cycle search
+windows), `stratum_client_test.exe` (live protocol check).
 
-## Проверка корректности
+## Correctness checks
 
-Криптоядро проверено **двумя независимыми реализациями**, потому что ошибка в
-поворотах siphash или в порядке байт nonce даёт майнер, который работает и не
-находит ни одной шары:
+The crypto core is verified against **two independent implementations**, because a
+mistake in the siphash rotations or in the nonce byte order produces a miner that runs and
+never finds a single share:
 
 ```bat
-build\cmake\solver_bench.exe --selftest                  :: BLAKE2b KAT, раскладка заголовка
+build\cmake\solver_bench.exe --selftest                  :: BLAKE2b KAT, header layout
 build\cmake\solver_bench.exe --pre-pow-file build\job.txt --device-check
-python tools\check_keys.py <476 hex pre_pow> <nonce>     :: независимый BLAKE2b (hashlib)
-python tools\check_siphash.py --selftest                 :: независимый siphash на Python
+python tools\check_keys.py <476 hex pre_pow> <nonce>     :: independent BLAKE2b (hashlib)
+python tools\check_siphash.py --selftest                 :: independent siphash in Python
 ```
 
-Все три совпадают с реализацией на C++/CUDA.
+All three agree with the C++/CUDA implementation.
 
-## Быстрый старт
+## Quick start
 
 ```bat
 grinforge.exe --pool grin.2miners.com:3030 ^
-              --user <ваш_grin_адрес>.RIG1 ^
+              --user <your_grin_address>.RIG1 ^
               --pass x ^
               --power-limit 120 --temp-limit 80
 ```
 
-Сухой прогон без пула (замер GPS):
+Dry run without a pool (GPS measurement):
 
 ```bat
 solver_bench.exe --pre-pow-file build\job.txt --seconds 60
 ```
 
-## Лицензия
+## Licence
 
-Наш код — MIT (`LICENSE`). Файлы, производные от `tromp/cuckoo`
+Our code is MIT (`LICENSE`). Files derived from `tromp/cuckoo`
 (`src/solver/lean_solver.cu`, `src/solver/grin_params.hpp`,
-`src/solver/grin_verify.hpp`), остаются под **The FAIR MINING License**.
-Подробности и почему это не мешает нулевому dev fee — в `docs/third-party.md`.
+`src/solver/grin_verify.hpp`) remain under **The FAIR MINING License**.
+The details, and why this does not stand in the way of a zero dev fee, are in
+`docs/third-party.md`.
 
-## Ограничения и риски
+## Limitations and risks
 
-* `EDGEBITS=32` для CUDA-пути у Tromp **никогда не собирался**: в Makefile есть
-  `lcuda19/29/30/31`, но нет `lcuda32`. Причина найдена — сдвиг 32-битного слова
-  на 32 при `PART_BITS=0`. Исправлено (`FIX-2`/`CH-1`).
-* Lean-солвер по определению медленнее mean: он «memory latency bound», тогда как
-  mean — «bandwidth bound». Это физическая цена того, что солвер влезает в 8 ГБ.
-* Сеть GRIN (~3.5–4 kGps) добывается ASIC-фермами. Одна mid-range карта даёт
-  доли процента сети, экономика майнинга отрицательная при любом тарифе выше
-  ~$0.05/кВт·ч. Проект имеет смысл как инженерный/учебный и как заявка на
-  bounty Tromp ($10 000 за открытый C32-солвер на 1 gps при ≤100·x Вт).
+* `EDGEBITS=32` for Tromp's CUDA path **was never built**: the Makefile has
+  `lcuda19/29/30/31` but no `lcuda32`. The cause was found — a 32-bit word shifted by 32
+  when `PART_BITS=0`. Fixed (`FIX-2`/`CH-1`).
+* The lean solver is slower than mean by definition: it is memory-latency bound, whereas
+  mean is bandwidth bound. That is the physical price of a solver that fits in 8 GB.
+* The GRIN network (~3.5–4 kGps) is mined by ASIC farms. One mid-range card contributes a
+  fraction of a percent of the network, and the mining economics are negative at any rate
+  above ~$0.05/kWh. The project makes sense as an engineering/learning exercise and as an
+  entry for Tromp's bounty ($10 000 for an open C32 solver at 1 gps within ≤100·x W).
 
-## Привилегии: майнер никогда не требует прав администратора
+## Privileges: the miner never requires administrator rights
 
-Это осознанное свойство безопасности, а не временное ограничение.
+This is a deliberate security property, not a temporary limitation.
 
-**Что это даёт.** Процесс майнинга не может менять частоты, лимиты питания и кулер,
-не может писать за пределы своей папки, и если бинарник кто-то подменит, у него не
-будет повышенных прав. Для программы, которая круглосуточно работает на машине и
-принимает данные из сети, это существенно: компромисс майнера не превращается в
-компромисс системы.
+**What it buys you.** The mining process cannot change clocks, power limits or the fan,
+cannot write outside its own folder, and if someone swaps the binary it will not carry
+elevated rights. For a program that runs around the clock on a machine and takes data from
+the network, that matters: compromising the miner does not turn into compromising the
+system.
 
-| Действие | Нужен администратор? |
+| Action | Administrator required? |
 |---|---|
-| Майнинг, stratum, watchdog, failover, HTTP API, статистика | **нет** |
-| Чтение частот, температур, мощности, оборотов (NVML) | **нет** |
-| Проверка кошелька по allowlist (`--allow-address`) | **нет** |
-| Разовые ключи управления картой (`--power-limit`, `--lock-core`, `--undervolt-*`, `--fan`) | да, но они и не нужны для работы |
-| Разовая настройка профиля GPU (`--install-gpu-profile`) | да, один раз на машину |
+| Mining, stratum, watchdog, failover, HTTP API, statistics | **no** |
+| Reading clocks, temperatures, power, fan speed (NVML) | **no** |
+| Wallet allowlist check (`--allow-address`) | **no** |
+| One-shot GPU control flags (`--power-limit`, `--lock-core`, `--undervolt-*`, `--fan`) | yes, but they are not needed for operation anyway |
+| One-shot GPU profile setup (`--install-gpu-profile`) | yes, once per machine |
 
-**Как это устроено, чтобы не было «тихих» отказов.** Ключи управления картой при
-запуске без прав не делают вид, что сработали: каждый отказ возвращается с причиной и
-флагом `needs_elevation` и печатается в лог. Разовая настройка вынесена в отдельный
-режим, который применяет профиль и **сразу завершается** — привилегированный процесс
-не остаётся жить на машине:
+**How it is arranged so there are no "silent" failures.** Started without rights, the GPU
+control flags do not pretend to have worked: every refusal comes back with a reason and a
+`needs_elevation` flag and is printed to the log. The one-shot setup is moved into a
+separate mode that applies the profile and **exits immediately** — no privileged process is
+left running on the machine:
 
 ```bat
-:: один раз, в консоли администратора
+:: once, in an administrator console
 "build\cmake\grinforge.exe" --install-gpu-profile 2500
-install-gpu-clock-task.bat        :: чтобы настройка переживала перезагрузки
+install-gpu-clock-task.bat        :: so the setting survives reboots
 ```
 
-Обычный запуск майнера — как всегда, без прав администратора.
+The normal miner run is as always, without administrator rights.
 
-**Майнер сам подскажет.** Он не может определить наличие ограничения частоты напрямую
-(`nvidia-smi` не сообщает об этом: `Max Clocks` всегда показывает аппаратный максимум),
-поэтому через ~90 секунд под нагрузкой он оценивает наблюдаемую частоту и пишет в лог
-либо что профиль эффективности активен, либо точную команду для его включения.
+**The miner will tell you itself.** It cannot detect a clock cap directly
+(`nvidia-smi` does not report it: `Max Clocks` always shows the hardware maximum), so
+after ~90 seconds under load it estimates the observed clock and logs either that an
+efficiency profile is active or the exact command to enable one.
 
-## Ограничение частоты ядра (измеренный оптимум)
+## Core clock cap (the measured optimum)
 
-Подбор режимов (`grinforge --tune`) показал, что **хешрейт не зависит от настроек
-карты**: 0.0538–0.0549 GPS при разбросе ~1 % между всеми профилями, включая снижение
-частоты ядра почти вдвое. Поэтому частота покупает не скорость, а эффективность:
-потолок буста 2500 МГц даёт тот же GPS при заметно меньшем потреблении.
+Mode tuning (`grinforge --tune`) showed that **hashrate does not depend on the card's
+settings**: 0.0538–0.0549 GPS with a ~1 % spread across all profiles, including cutting the
+core clock almost in half. So clock speed buys efficiency, not speed: a 2500 MHz boost
+ceiling gives the same GPS at noticeably lower power draw.
 
-Применено на этой машине:
+Applied on this machine:
 
 ```bat
-:: разово, нужны права администратора
+:: one-off, requires administrator rights
 nvidia-smi --lock-gpu-clocks=0,2500
 
-:: снять
+:: remove
 gpu-unlock.bat            :: = nvidia-smi --reset-gpu-clocks
 ```
 
-Используется **потолок** (`0,2500`), а не жёсткая прибивка (`2500,2500`): под нагрузкой
-карта всё равно встаёт на ~2490 МГц, но в простое может сбрасывать частоту, не поднимая
-потребление рабочего стола.
+A **ceiling** (`0,2500`) is used, not a hard lock (`2500,2500`): under load the card
+settles at ~2490 MHz anyway, but at idle it can drop the clock without raising desktop
+power draw.
 
-### Ограничение действует только пока работает майнер
+### The cap applies only while the miner is running
 
-Держать потолок 2500 МГц постоянно неправильно: игры и видео хотят полный буст до
-3105 МГц, а выгода от ограничения — всего 3–7 Вт (порядка 20 рублей в месяц). Поэтому
-переключение автоматизировано, а не делается руками через UAC.
+Holding a 2500 MHz ceiling permanently is wrong: games and video want the full boost up to
+3105 MHz, and the benefit of the cap is only 3–7 W (around 20 roubles a month). So the
+switching is automated rather than done by hand through UAC.
 
-`install-gpu-clock-guard.bat` создаёт задачу «GrinForge GPU clock guard», которая раз в
-минуту проверяет, запущен ли `grinforge.exe`, и **трогает GPU только при смене
-состояния**:
+`install-gpu-clock-guard.bat` creates the task "GrinForge GPU clock guard", which checks
+once a minute whether `grinforge.exe` is running and **touches the GPU only when the state
+changes**:
 
-| Состояние | Что делает сторож |
+| State | What the guard does |
 |---|---|
-| Майнер работает | `nvidia-smi --lock-gpu-clocks=300,2500` |
-| Майнер не работает | `nvidia-smi --reset-gpu-clocks` — полный буст для игр |
+| Miner running | `nvidia-smi --lock-gpu-clocks=300,2500` |
+| Miner not running | `nvidia-smi --reset-gpu-clocks` — full boost for games |
 
-Проверено на этой машине:
+Verified on this machine:
 
 ```
 22:10:02  miner running  -> capping to 300..2500 MHz
-22:11:02  miner stopped  -> resetting clocks (full boost for games/video)   (210 МГц, 7.4 Вт в простое)
+22:11:02  miner stopped  -> resetting clocks (full boost for games/video)   (210 MHz, 7.4 W at idle)
 22:12:02  miner running  -> capping to 300..2500 MHz
 ```
 
-Сторож — это **отдельная маленькая задача планировщика, а не майнер**: сам процесс
-майнинга по-прежнему работает без прав администратора (см. раздел о привилегиях).
+The guard is **a separate small scheduled task, not the miner**: the mining process itself
+still runs without administrator rights (see the privileges section).
 
 ```bat
-:: снять ограничение прямо сейчас, не дожидаясь минуты
-gpu-unlock.bat                     :: или nvidia-smi --reset-gpu-clocks
+:: lift the cap right now without waiting for the next minute
+gpu-unlock.bat                     :: or nvidia-smi --reset-gpu-clocks
 
-:: логи сторожа и удаление
+:: guard logs and removal
 type %ProgramData%\grinforge-gpu-guard.log
 schtasks /Delete /TN "GrinForge GPU clock guard" /F
 ```
 
-Если пользователь выставит профиль вручную (Afterburner, NVIDIA app), сторож его не
-перебьёт, пока состояние майнинга не изменится — именно для этого он сравнивает
-состояние с сохранённым, а не дёргает GPU каждую минуту.
+If the user sets a profile by hand (Afterburner, NVIDIA app), the guard will not override
+it until the mining state changes — which is exactly why it compares the state against the
+saved one instead of poking the GPU every minute.
 
-Замеры и обоснование — в `docs/performance-notes.md`, раздел 7.
+The measurements and the reasoning are in `docs/performance-notes.md`, section 7.
 
-## Пиковые часы цен API (учёт в работе)
+## API price peak hours (accounted for in the workflow)
 
-Проект ведётся с оглядкой на **цены DeepSeek API**, а не на тарифы на
-электроэнергию. Источник — [Models & Pricing, DeepSeek API Docs](https://api-docs.deepseek.com/quick_start/pricing/):
+The project is run with an eye on **DeepSeek API prices**, not on electricity tariffs.
+The source is [Models & Pricing, DeepSeek API Docs](https://api-docs.deepseek.com/quick_start/pricing/):
 
 > Peak hours are 01:00–04:00 and 06:00–10:00 UTC, Monday through Friday, excluding
 > Chinese public holidays. All other hours are off-peak, including weekends and
 > Chinese public holidays in full. Off-peak rates are half of the peak rates.
 
-| | UTC (будни, кроме праздников КНР) | Москва (UTC+3) |
+| | UTC (weekdays, excluding PRC holidays) | Moscow (UTC+3) |
 |---|---|---|
-| **Пик (полная цена)** | 01:00–04:00 и 06:00–10:00 | **04:00–07:00 и 09:00–13:00** |
-| **Off-peak (вдвое дешевле)** | все прочие часы | 13:00–04:00 и все выходные |
+| **Peak (full price)** | 01:00–04:00 and 06:00–10:00 | **04:00–07:00 and 09:00–13:00** |
+| **Off-peak (half price)** | all other hours | 13:00–04:00 and all weekends |
 
-В пиковые окна дорогая активность (длинные прогоны, сборки, профилирование)
-приостанавливается; майнер продолжает работать и писать события в лог, чтобы не
-терять статистику. Напоминания стоят на 04:00 и 09:00 МСК (свернуть) и 07:00 и
-13:00 МСК (возобновить) по будням.
+During peak windows, expensive activity (long runs, builds, profiling) is paused; the
+miner keeps running and logging events so as not to lose statistics. Reminders are set for
+04:00 and 09:00 MSK (wind down) and 07:00 and 13:00 MSK (resume) on weekdays.
 
-Оговорка: государственные праздники КНР код не отслеживает — в эти дни пик
-фактически не действует, и расписание можно игнорировать.
+Caveat: the code does not track PRC public holidays — on those days the peak is not
+actually in effect, and the schedule can be ignored.
 
 

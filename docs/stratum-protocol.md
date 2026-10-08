@@ -121,55 +121,55 @@ identified. Do not reorder or normalise these bytes — hash them as delivered.
 schema. Use it to verify a client without submitting shares.
 `tools/pre_pow_analyze.py` dumps a `pre_pow` blob byte-by-byte with offsets.
 
-## 6. Разрешено: какую форму `pow` пул действительно принимает
+## 6. Resolved: which form of `pow` the pool actually accepts
 
-Первая реальная отправка (шара `lz=6`, сложность 1 048 576) прошла **формой с ключом
-`Cuckoo`** — и пул не ответил вообще: ни `accepted`, ни `rejected`. Локально
-`total_accepted_shares` остался 0, а публичный API пула не показал у нашего кошелька
-ни `currentHashrates`, ни воркера в списке активных майнеров. То есть форму с ключом
-пул молча игнорирует.
+The first real submission (a share with `lz=6`, difficulty 1 048 576) went out **in
+the form keyed by `Cuckoo`** — and the pool did not answer at all: neither `accepted`
+nor `rejected`. Locally `total_accepted_shares` stayed at 0, and the pool's public API
+showed neither `currentHashrates` for our wallet nor a worker in the list of active
+miners. In other words, the pool silently ignores the keyed form.
 
-Решает эталонный клиент `client8568/High-Resource-Cuckatoo-Miner` (MIT), который
-известно работает с этим пулом. Его `Makefile`:
+The deciding factor is the reference client `client8568/High-Resource-Cuckatoo-Miner`
+(MIT), which is known to work with this pool. Its `Makefile`:
 
 ```
 STRATUM_SERVER_USES_MORE_THAN_ONE_MINING_ALGORITHM = false
 ```
 
-При `false` в `main.cpp` выбирается ветка `#else`, то есть **плоская** форма:
+With `false`, `main.cpp` takes the `#else` branch, i.e. the **flat** form:
 
 ```json
 {"id":"1","jsonrpc":"2.0","method":"submit","params":{"edge_bits":32,"height":438...,"job_id":0,"nonce":...,"pow":[e0,...,e41]}}
 ```
 
-`edge_bits` при этом стоит на верхнем уровне `params`, а `pow` — просто массив.
-**Эта форма и выбрана значением по умолчанию** в нашем клиенте
-(`Config::use_edge_bits_submit_form = true`). Форма с ключом `Cuckoo` осталась как
-автоматический fallback на случай отказа «malformed».
+Here `edge_bits` sits at the top level of `params`, and `pow` is just an array. **This
+form is the default** in our client (`Config::use_edge_bits_submit_form = true`). The
+form keyed by `Cuckoo` remains as an automatic fallback in case of a “malformed”
+rejection.
 
-### Что ещё подтверждено публичным API пула
+### What else the pool's public API confirms
 
 `https://grin.2miners.com/api/stats`:
 
-| Поле | Значение | Смысл |
+| Field | Value | Meaning |
 |---|---|---|
-| `minDiff` | **16384** | минимальная сложность шары = `graph_weight(32)`. Наша шара с `lz=6` имеет сложность 1 048 576 — в 64 раза выше минимума, то есть дело не в сложности |
-| `netdiff` | 88 837 534 | сложность сети |
-| `nethr` | 3486 | хешрейт сети в GPS |
-| `minersTotal` / `workersTotal` | 141 / 419 | пул целиком |
+| `minDiff` | **16384** | minimum share difficulty = `graph_weight(32)`. Our share with `lz=6` has difficulty 1 048 576 — 64 times the minimum, so difficulty is not the issue |
+| `netdiff` | 88 837 534 | network difficulty |
+| `nethr` | 3486 | network hashrate in GPS |
+| `minersTotal` / `workersTotal` | 141 / 419 | the pool as a whole |
 
-### Поведение соединения
+### Connection behaviour
 
-Пул закрывает TCP-соединение примерно каждые **110 секунд** (RST, Winsock 10054) —
-это его политика, а не ошибка клиента: keepalive каждые 10 с получает `result: ok`,
-job'ы приходят регулярно. Клиент переподключается за 1 с. Риск в том, что шара,
-отправленная непосредственно перед разрывом, остаётся без ответа — именно это и
-произошло с первой отправкой. По этой причине все строки лога майнера несут метки
-времени: без них корреляцию отправок с разрывами измерить нельзя.
+The pool closes the TCP connection roughly every **110 seconds** (RST, Winsock 10054) —
+that is its policy, not a client bug: a keepalive every 10 s gets `result: ok`, and jobs
+arrive regularly. The client reconnects within 1 s. The risk is that a share sent
+immediately before the disconnect is left unanswered — that is exactly what happened
+with the first submission. For this reason every miner log line carries a timestamp:
+without them the correlation between submissions and disconnects cannot be measured.
 
-## 7. Проверено
+## 7. Verified
 
-1. **Приём шары пулом в плоской форме подтверждён.** 8 октября 2026 в 21:04 МСК:
+1. **Acceptance of a share by the pool in the flat form is confirmed.** 8 October 2026 at 21:04 MSK:
 
    ```
    submitted solution height=4053661 job_id=0 nonce=0 lz=1
@@ -177,16 +177,16 @@ job'ы приходят регулярно. Клиент переподключ�
    submit accepted by the pool
    ```
 
-   Локально `acc=1 rej=0 stale=0`. Независимо со стороны пула:
-   `https://grin.2miners.com/api/accounts/<кошелёк>` вернул
-   `currentHashrates: {"32":0.07}`, и воркер появился в
+   Locally `acc=1 rej=0 stale=0`. Independently, from the pool's side:
+   `https://grin.2miners.com/api/accounts/<wallet>` returned
+   `currentHashrates: {"32":0.07}`, and the worker appeared in
    `https://grin.2miners.com/api/miners`.
 
-2. **Порог минимальной сложности** шары: `minDiff` в `/api/stats` равен 16384, то
-   есть `graph_weight(32)`. Наши шары стартуют от 16384 · 2^lz, то есть проходят с
-   запасом.
+2. **Minimum share difficulty threshold**: `minDiff` in `/api/stats` is 16384, i.e.
+   `graph_weight(32)`. Our shares start at 16384 · 2^lz, so they clear it with room to
+   spare.
 
-3. **Поведение соединения**: пул закрывает TCP каждые ~110 с по своей политике;
-   клиент переподключается за 1 с. Шара, отправленная непосредственно перед
-   разрывом, может остаться без ответа — именно так и произошло с первой отправкой,
-   ещё в неправильной форме.
+3. **Connection behaviour**: the pool closes TCP every ~110 s by its own policy; the
+   client reconnects within 1 s. A share sent immediately before the disconnect may be
+   left unanswered — that is exactly what happened with the first submission, which was
+   still in the wrong form.

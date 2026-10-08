@@ -1,115 +1,115 @@
-# Разбор: почему конвейер не находил решения, и как это исправлено
+# Post-mortem: why the pipeline found no solutions, and how it was fixed
 
-Документ переписан после того, как две предыдущие версии диагноза оказались
-неверными. Ниже — только проверенные факты и явно отмеченные уроки.
+This document was rewritten after two earlier versions of the diagnosis turned out
+to be wrong. What follows is only verified facts and explicitly flagged lessons.
 
-## Итог
+## Bottom line
 
-**Конвейер работает.** Подтверждено независимо воспроизводимыми результатами:
+**The pipeline works.** Confirmed by independently reproducible results:
 
 ```
-solver_bench_tiny --nonce-start 15 --nonce-count 6 --ntrims 16
-  attempts=6 solutions=5 verified=5        каждое решение verify=OK
+solver_bench_tiny --pre-pow-file build\job.txt --nonce-start 15 --nonce-count 6 --ntrims 16
+  attempts=6 solutions=5 verified=5        every solution verify=OK
 
-solver_bench29    --nonce-start 85 --nonce-count 3 --ntrims 68
+solver_bench29    --pre-pow-file build\job.txt --nonce-start 85 --nonce-count 3 --ntrims 68
   nonce 85: raw_cycles=1 sols=1 verify=OK lz=3 difficulty=14848
   attempts=3 solutions=1 verified=1
 ```
 
-Второй результат — настоящий 42-цикл: 42 различных индекса рёбер, прошедший
-`grin_verify`, то есть пригодный для отправки в пул.
+The second result is a genuine 42-cycle: 42 distinct edge indices that passed
+`grin_verify`, meaning it is good enough to submit to a pool.
 
-## Корневая причина: модель узла Cuckatoo
+## Root cause: the Cuckatoo node model
 
-Ключ был найден **в консенсус-коде GRIN**, а не в наших тестах:
+The key was found **in the GRIN consensus code**, not in our tests:
 
-> **Узел Cuckatoo — это `sipnode(keys, e, uorv) >> 1`.** Отброшенный младший бит —
-> это **слот чётности**, и у двух рёбер цикла, сходящихся в одном узле, значения
-> слотов обязаны **различаться**.
+> **A Cuckatoo node is `sipnode(keys, e, uorv) >> 1`.** The discarded low bit is
+> the **parity slot**, and the two edges of a cycle that meet at the same node must
+> have **different** slot values.
 
-Доказательство: наш `grin_verify` принимает опубликованный в GRIN консенсус-вектор
-`V1_32` (заголовок `[0u8;80]` + little-endian u32 nonce 17). Его 42 u-конца
-образуют ровно 21 пару `{x, x^1}`, а сопоставление узлов по равенству «сырого»
-значения отвергается с `POW_DEAD_END`.
+Proof: our `grin_verify` accepts the consensus vector `V1_32` published in GRIN
+(header `[0u8;80]` + little-endian u32 nonce 17). Its 42 u-ends form exactly
+21 pairs `{x, x^1}`, while matching nodes by equality of the "raw" value is
+rejected with `POW_DEAD_END`.
 
-Из этой модели следуют **две** независимые ошибки, и исправить нужно было обе.
+This model implies **two** independent bugs, and both had to be fixed.
 
-### Ошибка 1 (внесена мной): правило CH-7 было регрессией
+### Bug 1 (introduced by me): the CH-7 rule was a regression
 
-Я заменил однобитный битмап `nonleaf` на счётчик степени ≥ 2 по «сырым» значениям,
-посчитав исходное `^1` у Tromp опечаткой. Это оказалось неверно: `u ^ 1` — это
-**слот-партнёр того же узла**, и вся конструкция Tromp согласована
-(`graph.hpp::adjlist[u ^ 1]`, `compress.hpp` с `parity = u & 1`,
-`kill_leaf_edges` с `!nonleaf.test(u ^ 1)`).
+I replaced the one-bit `nonleaf` bitmap with a degree-count ≥ 2 over "raw" values,
+assuming the original `^1` in Tromp was a typo. That turned out to be wrong: `u ^ 1`
+is the **slot partner of the same node**, and Tromp's whole construction is
+consistent (`graph.hpp::adjlist[u ^ 1]`, `compress.hpp` with `parity = u & 1`,
+`kill_leaf_edges` with `!nonleaf.test(u ^ 1)`).
 
-Измерения на CPU с точным повторением логики ядра (C20/P6, 16 раундов):
+CPU measurements that exactly reproduce the kernel logic (C20/P6, 16 rounds):
 
-| Правило | Живых рёбер | Узлов с обоими занятыми слотами |
+| Rule | Live edges | Nodes with both slots occupied |
 |---|---|---|
-| CH-7 (степень ≥ 2 по сырому значению) | 13 533 | **48** |
-| partner-slot (`kill if sipnode^1 отсутствует`) | 13 209 | **11 831** |
+| CH-7 (degree ≥ 2 by raw value) | 13 533 | **48** |
+| partner-slot (`kill if sipnode^1 is absent`) | 13 209 | **11 831** |
 
-При 48 узлах валидный цикл существовать не может в принципе — счётчик `raw_cycles`
-оставался бы нулевым даже с идеальным поиском. Правило восстановлено до
-`partner-slot`, как в `core/src/pow/lean.rs::count_and_kill` у GRIN и в
+With 48 nodes, a valid cycle cannot exist in principle: the `raw_cycles` counter
+would have stayed at zero even with a perfect search. The rule was restored to
+`partner-slot`, as in GRIN's `core/src/pow/lean.rs::count_and_kill` and in
 `tromp/cuckatoo/lean.cu`. `kNodeBits` 2 → 1.
 
-### Ошибка 2: поиск циклов не учитывал слоты
+### Bug 2: the cycle search ignored slots
 
-Первая версия моего `cycle_finder.hpp` интернировала «сырые» значения `sipnode` без
-слота — такие циклы не могут пройти `grin_verify`. Переписано: `raw >> 1`
-интернируется в плотный индекс, слот переносится на полуребро, обход чередует
-U/V, требуя **другого слота** в каждом узле, и замыкается ровно так, как обходит
-`grin_verify`. DFS итеративный, с жёстким лимитом `max_steps`.
+The first version of my `cycle_finder.hpp` interned the "raw" `sipnode` values
+without the slot — such cycles cannot pass `grin_verify`. Rewritten: `raw >> 1`
+is interned into a dense index, the slot is carried onto the half-edge, the walk
+alternates U/V and requires a **different slot** at each node, closing exactly the
+way `grin_verify` traverses. The DFS is iterative, with a hard `max_steps` limit.
 
-### Отдельно: ловушка системы сборки
+### Separately: a build-system trap
 
-Ninja **не отслеживал** `lean_solver.hpp` для C++-целей: изменение заголовка
-перелинковывало, но не перекомпилировало `solver_bench.cpp` и `main.cpp`.
-Устаревший харнесс читал `SolverConfig::max_search_steps` как неинициализированный
-**0**, поиск ограничивался нулём шагов и `raw_cycles=0` получался **даже при
-исправленном солвере**; вдобавок `last_run()` писал структуру большего размера в
-меньшую временную переменную вызывающего (`STATUS_HEAP_CORRUPTION`). Исправлено
-явными `OBJECT_DEPENDS` в `CMakeLists.txt`.
+Ninja **did not track** `lean_solver.hpp` for the C++ targets: changing the header
+relinked but did not recompile `solver_bench.cpp` and `main.cpp`.
+The stale harness read `SolverConfig::max_search_steps` as uninitialized
+**0**, the search was capped at zero steps, and `raw_cycles=0` came out **even with
+the solver fixed**; on top of that, `last_run()` wrote a larger struct into the
+caller's smaller temporary variable (`STATUS_HEAP_CORRUPTION`). Fixed with
+explicit `OBJECT_DEPENDS` in `CMakeLists.txt`.
 
-## Ожидаемая частота решений
+## Expected solution rate
 
-Математическое ожидание числа циклов длины `PROOFSIZE` на граф равно
-**1 / PROOFSIZE**, независимо от `EDGEBITS`:
+The mathematical expectation of the number of cycles of length `PROOFSIZE` per
+graph is **1 / PROOFSIZE**, independent of `EDGEBITS`:
 
-| Цикл | Ожидание на граф | Наблюдение |
+| Cycle | Expectation per graph | Observation |
 |---|---|---|
-| 6 при C20 | 1/6 ≈ 0.167 | 7 решений на 24 графах |
-| 42 при C29 | 1/42 ≈ 0.024 | 4 решения на 170 графах |
-| 42 при C32 | 1/42 ≈ 0.024 | 0 на 3 графах (ожидалось 0.07) |
+| 6 at C20 | 1/6 ≈ 0.167 | 7 solutions across 24 graphs |
+| 42 at C29 | 1/42 ≈ 0.024 | 4 solutions across 170 graphs |
+| 42 at C32 | 1/42 ≈ 0.024 | 0 across 3 graphs (0.07 expected) |
 
-Отсюда: **отсутствие решений на коротких прогонах ничего не доказывает.** При
-p = 1/42 вероятность не увидеть ни одного решения за 24 графа — 56 %.
+Hence: **the absence of solutions in short runs proves nothing.** With
+p = 1/42, the probability of seeing no solution at all across 24 graphs is 56%.
 
-## Что подтверждено измерениями (сводка)
+## What measurements confirmed (summary)
 
-| Утверждение | Проверка | Результат |
+| Claim | Check | Result |
 |---|---|---|
-| Заголовок → ключи siphash | независимые BLAKE2b и siphash на Python | совпадают побитово |
-| device- и host-siphash | `--device-check`, плюс сверка на всём пространстве 2^20 рёбер | 0 расхождений |
-| Модель узла | консенсус-вектор GRIN `V1_32` через `grin_verify` | OK; 21 пара `{x, x^1}` |
-| Тримминг | совпадение с CPU-репликацией логики ядра по каждому nonce | 13209/13754/12958/12776/13370/12272 |
-| Поиск циклов | воспроизведённые решения | C20: 5/5 OK; C29: 42-цикл OK, difficulty 14848 |
-| Ограничение шагов | максимумы 65k / 3.9M / 8.9M при лимите 400M | лимит не достигается; принудительный лимит 200 шагов срабатывает |
-| Отсутствие зависаний | C32: ~1.0M рёбер, 16.9 с тримминг, без `OVERLOADED` | воспроизведено |
+| Header → siphash keys | independent BLAKE2b and siphash in Python | match bit for bit |
+| device and host siphash | `--device-check`, plus cross-check over the entire 2^20 edge space | 0 discrepancies |
+| Node model | GRIN consensus vector `V1_32` through `grin_verify` | OK; 21 pairs `{x, x^1}` |
+| Trimming | agreement with a CPU replication of the kernel logic per nonce | 13209/13754/12958/12776/13370/12272 |
+| Cycle search | reproduced solutions | C20: 5/5 OK; C29: 42-cycle OK, difficulty 14848 |
+| Step bound | maxima 65k / 3.9M / 8.9M against a 400M limit | limit not reached; a forced 200-step limit does trigger |
+| No hangs | C32: ~1.0M edges, 16.9 s of trimming, no `OVERLOADED` | reproduced |
 
-## Уроки
+## Lessons
 
-1. **Параметры проверки надо выбирать там, где решения заведомо существуют.**
-   `EDGEBITS=20` с `PROOFSIZE=6` к таким не относится: ожидание 1/6 на граф, и ноль
-   на шести графах — норма.
-2. **Независимая реализация не помогает, если она повторяет ошибочную модель.**
-   Я «подтвердил» тримминг независимым Python-расчётом 2-ядра (GPU 488 = Python
-   488), но Python использовал ту же «сырую» модель узлов, что и CH-7. Это была
-   проверка реализации неверной модели, а не модели.
-3. **Модель надо брать из спецификации, а не из поведения своего кода.** Верная
-   модель нашлась в консенсус-векторе GRIN, а не в наших тестах.
-4. **Отрицательный результат на малой выборке — не доказательство.** Две мои
-   «корневые причины» были построены на недостаточной статистике.
-5. **Система сборки — часть конвейера.** Устаревший объектный файл давал
-   `raw_cycles=0` при уже исправленном коде и маскировал исправление.
+1. **Verification parameters must be chosen where solutions are guaranteed to exist.**
+   `EDGEBITS=20` with `PROOFSIZE=6` is not such a case: the expectation is 1/6 per
+   graph, and zero across six graphs is normal.
+2. **An independent implementation does not help if it repeats the wrong model.**
+   I "confirmed" the trimming with an independent Python computation of the 2-core
+   (GPU 488 = Python 488), but the Python used the same "raw" node model as CH-7.
+   That was a check of the implementation of a wrong model, not of the model.
+3. **The model must come from the specification, not from your own code's behavior.**
+   The correct model was found in the GRIN consensus vector, not in our tests.
+4. **A negative result on a small sample is not proof.** My two
+   "root causes" were both built on insufficient statistics.
+5. **The build system is part of the pipeline.** A stale object file produced
+   `raw_cycles=0` with already-fixed code and masked the fix.

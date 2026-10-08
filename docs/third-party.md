@@ -1,115 +1,118 @@
-# Лицензии и происхождение кода
+# Licenses and code provenance
 
-Проект распространяется под **MIT** (`LICENSE`), за исключением файлов, явно
-помеченных ниже. Это разделение сделано осознанно: MIT выбран как основная
-лицензия проекта (доверие, совместимость, требование заказчика), но код солвера
-происходит из `tromp/cuckoo`, который распространяется под **The FAIR MINING
-License**, а она не MIT.
+The project is distributed under **MIT** (`LICENSE`), except for the files
+explicitly marked below. This split is deliberate: MIT was chosen as the project's
+primary license (trust, compatibility, a customer requirement), but the solver
+code originates from `tromp/cuckoo`, which is distributed under **The FAIR MINING
+License**, and that license is not MIT.
 
 ## 1. The FAIR MINING License (John Tromp)
 
-Файлы и их производные:
+Files and their derivatives:
 
-| Файл | Что изменено |
+| File | What was changed |
 |---|---|
-| `src/solver/lean_solver.cu` | порт `lean.cu`: исправление `EDGEBITS=32`, MSVC-совместимость, GRIN-заголовок, отказ от `exit()` |
-| `src/solver/grin_params.hpp` | производное от `cuckatoo.h` + `siphash.hpp` |
-| `src/solver/grin_verify.hpp` | производное от `cuckatoo.h` (`verify`, `setheader`) |
-| `third_party/tromp-cuckoo/**` | не изменялся, используется как есть |
+| `src/solver/lean_solver.cu` | port of `lean.cu`: fix for `EDGEBITS=32`, MSVC compatibility, GRIN header, dropping `exit()` |
+| `src/solver/grin_params.hpp` | derivative of `cuckatoo.h` + `siphash.hpp` |
+| `src/solver/grin_verify.hpp` | derivative of `cuckatoo.h` (`verify`, `setheader`) |
+| `third_party/tromp-cuckoo/**` | unmodified, used as is |
 
-Полный текст: `third_party/tromp-cuckoo/LICENSE.txt`.
+Full text: `third_party/tromp-cuckoo/LICENSE.txt`.
 
-### Локальные патчи upstream (минимальны и помечены в коде)
+### Local upstream patches (minimal, and marked in the code)
 
-При сборке MSVC выявил два места, которые собираются только GCC/Clang:
+The MSVC build turned up two places that only compile with GCC/Clang:
 
-| Файл | Патч | Причина |
+| File | Patch | Reason |
 |---|---|---|
-| `src/cuckatoo/graph.hpp` | `sizeof(word_t[2*MAXNODES])` → `sizeof(word_t) * 2 * MAXNODES` (и то же для `link[2*MAXEDGES]`, 4 места) | `sizeof(T[n])` с runtime-границей — расширение VLA; MSVC: «expression must have a constant value» |
-| `src/cuckatoo/compress.hpp` | `sizeof(word_t[SIZE])` → `sizeof(word_t) * SIZE` (2 места) | то же |
-| `src/solver/grin_params.hpp` | не определять `NODEBITS` | макрос конфликтует с полем `u32 NODEBITS;` в `compress.hpp`; upstream определяет его *после* `graph.hpp` именно поэтому |
+| `src/cuckatoo/graph.hpp` | `sizeof(word_t[2*MAXNODES])` → `sizeof(word_t) * 2 * MAXNODES` (and the same for `link[2*MAXEDGES]`, 4 places) | `sizeof(T[n])` with a runtime bound is a VLA extension; MSVC: "expression must have a constant value" |
+| `src/cuckatoo/compress.hpp` | `sizeof(word_t[SIZE])` → `sizeof(word_t) * SIZE` (2 places) | same |
+| `src/solver/grin_params.hpp` | do not define `NODEBITS` | the macro conflicts with the field `u32 NODEBITS;` in `compress.hpp`; that is exactly why upstream defines it *after* `graph.hpp` |
 
-Семантика патчей `sizeof` идентична на всех компиляторах. Правки помечены
-комментариями `LOCAL PATCH (GrinForge, ...)` в самих файлах.
+The semantics of the `sizeof` patches are identical on all compilers. The changes
+are marked with `LOCAL PATCH (GrinForge, ...)` comments in the files themselves.
 
-### Ключевое условие лицензии
+### Key license condition
 
 > **FAIR MINING**
 > Any derived miner that charges a developer fee for mining a fair coin
 > — one with no premine or other form of developer compensation —
 > shall offer to share half the fee revenue with the coin developers.
 
-**GrinForge не взимает developer fee (0 %).** Условие FAIR MINING сформулировано
-как обязанность, возникающая *у майнера, который взимает fee*. При нулевом fee
-обязанность не активируется, и лицензия прямо разрешает:
+**GrinForge charges no developer fee (0 %).** The FAIR MINING condition is worded
+as an obligation arising *for the miner that charges a fee*. At a zero fee the
+obligation does not activate, and the license explicitly permits:
 
 > use, copy, modify, merge, publish, distribute, **sublicense**, and/or sell
 
-Таким образом, распространение производного кода законно при выполнении двух
-условий, которые мы соблюдаем:
+Distribution of the derivative code is therefore lawful subject to two conditions,
+which we meet:
 
-1. сохранён copyright notice и текст FAIR MINING (этот файл + заголовки в файлах);
-2. dev fee равен нулю — и не может быть добавлен без перехода на FAIR MINING-условия.
+1. the copyright notice and the FAIR MINING text are retained (this file + the headers in the files);
+2. the dev fee is zero — and it cannot be added without switching to the FAIR MINING condition.
 
-Требование лицензии «The above copyright notice, FAIR MINING condition, and this
-permission notice shall be included in all copies or substantial portions of the
-Software» выполняется: `third_party/tromp-cuckoo/LICENSE.txt` распространяется
-вместе с исходниками, а каждый производный файл содержит ссылку на происхождение.
+The license requirement "The above copyright notice, FAIR MINING condition, and
+this permission notice shall be included in all copies or substantial portions of
+the Software" is satisfied: `third_party/tromp-cuckoo/LICENSE.txt` is distributed
+together with the sources, and every derivative file carries a reference to its
+origin.
 
-**Важно:** если кто-либо в будущем добавит dev fee, он обязан выполнить условие
-FAIR MINING и делиться половиной дохода с разработчиками GRIN. Поэтому в проекте
-fee не просто «не включён» — он архитектурно не предусмотрен.
+**Important:** if anyone adds a dev fee in the future, they are obliged to fulfil
+the FAIR MINING condition and share half the revenue with the GRIN developers.
+That is why the fee in this project is not merely "not enabled" — it is
+architecturally not provided for.
 
 ## 2. BLAKE2b
 
 `third_party/tromp-cuckoo/src/crypto/blake2b-ref.c`, `blake2.h`, `blake2-impl.h` —
-reference-реализация BLAKE2, Copyright 2012 Samuel Neves.
-Лицензия: **CC0 1.0 / OpenSSL / Apache-2.0 на выбор** (см. шапку `blake2.h`).
-Совместима с MIT-проектом.
+reference implementation of BLAKE2, Copyright 2012 Samuel Neves.
+License: **CC0 1.0 / OpenSSL / Apache-2.0, your choice** (see the header of `blake2.h`).
+Compatible with the MIT project.
 
 ## 3. portable_endian.h
 
-Public domain (Mathias Panzenböck). Мы его **не используем** — endian-хелперы
-заменены прямым `memcpy` в `grin_params.hpp` (`FIX-1`), так как целевая
-платформа little-endian, а заголовок требует `sys/param.h` и `htonll`, которых
-нет в MSVC.
+Public domain (Mathias Panzenböck). We do **not** use it — the endian helpers were
+replaced by a direct `memcpy` in `grin_params.hpp` (`FIX-1`), because the target
+platform is little-endian and the header requires `sys/param.h` and `htonll`,
+which MSVC does not have.
 
-## 4. Исследовательские материалы (не входят в сборку)
+## 4. Research materials (not part of the build)
 
-| Что | Откуда | Лицензия | Как использовано |
+| Item | Source | License | How it was used |
 |---|---|---|---|
-| `third_party/hires-cuckatoo/` | `client8568/High-Resource-Cuckatoo-Miner` | MIT | **только как справочник** для реверса stratum-протокола 2Miners |
-| `tools/stratum_probe.py` | наш код | MIT | живая проверка протокола |
+| `third_party/hires-cuckatoo/` | `client8568/High-Resource-Cuckatoo-Miner` | MIT | **reference only**, to reverse-engineer the 2Miners stratum protocol |
+| `tools/stratum_probe.py` | our code | MIT | live protocol verification |
 
-Из `High-Resource-Cuckatoo-Miner` **не скопировано ни строки исполняемого кода**.
-Из него установлены только факты протокола (238-байтовый `pre_pow`, 8-байтовый
-big-endian nonce, форматы `login`/`getjobtemplate`/`submit`), которые
-подтверждены независимым живым подключением к пулу. Факты и алгоритмы
-лицензией не охраняются; охраняется конкретное выражение кода — оно не заимствовано.
+**No line of executable code was copied** from `High-Resource-Cuckatoo-Miner`.
+Only protocol facts were taken from it (the 238-byte `pre_pow`, the 8-byte
+big-endian nonce, the `login`/`getjobtemplate`/`submit` formats), and those were
+confirmed by an independent live connection to the pool. Facts and algorithms are
+not protected by license; what is protected is the specific expression of the
+code — and it was not borrowed.
 
-Из `High-Resource-Cuckatoo-Miner` также взята идея таблицы VRAM для Cuckatoo32,
-использованная только в аналитике.
+The idea of a VRAM table for Cuckatoo32 was also taken from
+`High-Resource-Cuckatoo-Miner`; it was used in analytics only.
 
-## 5. Что не используется и почему
+## 5. What is not used and why
 
-| Проект | Лицензия | Причина отказа |
+| Project | License | Reason for rejection |
 |---|---|---|
-| `mozkomor/GrinGoldMiner` | **GPL-3.0** | производная обязывала бы лицензировать весь проект под GPL-3.0 и отдавать исходники; кроме того, проект помечен DISCONTINUED и остановлен в январе 2020 — *до* HardFork4 |
-| `mimblewimble/grin-miner` | Apache-2.0 | лицензионно совместим, но под Windows не собирается; для C32 в нём есть только mean-плагин на 20 ГБ |
-| lolMiner, GMiner, Bminer | закрытые | лицензии прямо запрещают модификацию, декомпиляцию и изменение dev fee |
-| `3k3r1l4rz/m1_grin_miner_fastest` | **нет LICENSE** | по умолчанию all rights reserved |
+| `mozkomor/GrinGoldMiner` | **GPL-3.0** | a derivative would oblige us to license the whole project under GPL-3.0 and to release the sources; besides, the project is marked DISCONTINUED and was halted in January 2020 — *before* HardFork4 |
+| `mimblewimble/grin-miner` | Apache-2.0 | license-compatible, but it does not build on Windows; for C32 it has only a 20 GB mean plugin |
+| lolMiner, GMiner, Bminer | closed source | the licenses explicitly forbid modification, decompilation and changing the dev fee |
+| `3k3r1l4rz/m1_grin_miner_fastest` | **no LICENSE** | defaults to all rights reserved |
 
-## 6. Итоговая структура лицензий
+## 6. Final license structure
 
 ```
-GrinForge (в целом)                       MIT
+GrinForge (as a whole)                    MIT
 ├── src/host/, src/stratum/, src/monitor/  MIT
-├── src/solver/lean_solver.cu              FAIR MINING (производное от lean.cu)
-├── src/solver/grin_params.hpp             FAIR MINING (производное от cuckatoo.h)
-├── src/solver/grin_verify.hpp             FAIR MINING (производное от cuckatoo.h)
-├── third_party/tromp-cuckoo/              FAIR MINING / GPL-2.0+ (как есть)
+├── src/solver/lean_solver.cu              FAIR MINING (derivative of lean.cu)
+├── src/solver/grin_params.hpp             FAIR MINING (derivative of cuckatoo.h)
+├── src/solver/grin_verify.hpp             FAIR MINING (derivative of cuckatoo.h)
+├── third_party/tromp-cuckoo/              FAIR MINING / GPL-2.0+ (as is)
 └── third_party/tromp-cuckoo/src/crypto/blake2*  CC0 / OpenSSL / Apache-2.0
 ```
 
-Распространение бинарника требует приложить текст FAIR MINING и copyright
-John Tromp — см. `third_party/tromp-cuckoo/LICENSE.txt`.
+Distributing the binary requires attaching the FAIR MINING text and the copyright
+of John Tromp — see `third_party/tromp-cuckoo/LICENSE.txt`.

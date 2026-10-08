@@ -1,0 +1,65 @@
+# Changelog
+
+All notable changes to GrinForge. This project is young; the format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning is
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.0] - 2026-10-08
+
+First working release. It mines GRIN Cuckatoo32 on an NVIDIA Ada (sm_89) GPU under
+Windows x64 and has had shares accepted by a real pool. It is not fast, and the
+documentation says so plainly.
+
+### Added
+
+- **Cuckatoo32 lean CUDA solver** (`src/solver/`), ported from `tromp/cuckoo` and brought
+  up for `EDGEBITS=32` on `sm_89` with MSVC. Trims a 2^32-edge graph down to roughly one
+  million edges and searches it for 42-cycles.
+- **Independent verifier** (`src/solver/grin_verify.hpp`) checked against GRIN's published
+  `V1_32` consensus vector, so a solver bug cannot silently produce cycles the pool would
+  reject.
+- **GRIN stratum client** (`src/stratum/`): login, `getjobtemplate`, `job` notifications,
+  `keepalive` and `submit`, with a verified `submit` envelope and automatic fallback to
+  the other known envelope.
+- **Mining loop and watchdog** (`src/host/main.cpp`): nonce iteration, thermal guard,
+  stall recovery, pool failover, graceful shutdown.
+- **Telemetry and GPU control** (`src/monitor/`): NVML readings and NVAPI / `nvidia-smi`
+  based control, with every refusal reported instead of silently ignored.
+- **Wallet guard**: `--allow-address` refuses to start unless the address about to be
+  mined to is exactly the one the operator intends.
+- **Measured GPU tuning**: `--tune` sweeps profiles, measures GPS and GPS/W, and restores
+  defaults. `--install-gpu-profile` applies the measured optimum as a one-shot privileged
+  action.
+- **Guard against configuration drift**: a scheduled task keeps the 2500 MHz core-clock
+  cap applied only while the miner runs, so games get the full boost.
+- **Long-run supervisor**: `run-miner-forever.ps1` restarts the miner if it dies and logs
+  to one append-only file per day.
+- Documentation: protocol specification verified against a live pool, a post-mortem of two
+  wrong diagnoses, measured performance notes, a licence attribution record, and a pinned
+  validated environment with a re-validation procedure.
+
+### Verified
+
+- BLAKE2b and siphash agree with independent Python implementations.
+- Device and host siphash agree on all 2^20 edges of a small graph.
+- Real cycles found and verified: 6-cycles at C20/P6 (5 of 6 nonces) and 42-cycles at
+  C29/P42.
+- A share submitted to 2miners returned `method=submit result=ok`, and the pool's public
+  API reported our wallet's hashrate and listed the worker as active.
+
+### Known limitations
+
+- **Hashrate is a few hundredths of a GPS** (~0.055 locally, 0.07 as the pool accounts for
+  it). On an 8 GB card only the lean solver fits; the faster mean solver needs 20-33 GB.
+  Figures such as "RTX 4060 Ti ~ 0.65 H/s" are not reachable here.
+- **GPU settings do not change hashrate at all.** Measured across six profiles, the spread
+  is about 1 %, including halving the core clock. The lever is the kernel, not the card.
+- **Undervolting is impossible on this SKU** (`numBaseVoltages = 0`) and fan control is
+  blocked by the driver on consumer GeForce cards.
+- **Failover and multi-GPU are implemented but not exercised live** (one pool, one card).
+- **Not tested on other GPU models.** Other Ada cards should work; older architectures
+  will need `CMAKE_CUDA_ARCHITECTURES` changed.
+- Mining GRIN on a GPU is not competitive with ASICs. This project is about a correct,
+  auditable, fee-free implementation.
+
+[0.1.0]: https://github.com/albertplastauto/grinforge/releases/tag/v0.1.0
