@@ -21,6 +21,14 @@
 //         self-referential host struct into device memory.
 //   CH-6  GRIN-specific header/key derivation (238-byte pre_pow + big-endian u64
 //         nonce, BLAKE2b -> siphash keys) lives in grin_setheader.
+//   CH-7  Two correctness fixes without which NO solution can ever be reported:
+//           (a) the final stage is src/solver/cycle_finder.hpp, a bounded,
+//               slot-aware Cuckatoo cycle finder, replacing
+//               graph.hpp/compress.hpp/add_compress_edge;
+//           (b) the trim kernels use the partner-slot rule (`w ^ 1` present)
+//               instead of a degree >= 2 counter. See the CH-7 comment on
+//               slot_seen_set/slot_seen_test below - the degree rule left almost
+//               no node with both slots occupied, which is why raw_cycles was 0.
 
 #include <cuda_runtime.h>
 
@@ -64,12 +72,12 @@ namespace {
 // table — which silently overflowed and returned garbage node ids — no longer
 // exists in this build.
 
-// CH-7 (see the helper section below): the leaf test needs a degree >= 2 counter,
-// which costs two bits per node.
-const u64 kNodeBits = 2;
+// CH-7 (see the helper section below): the leaf test is the partner-slot test, so
+// one bit per raw endpoint value is enough (upstream's `biitmap`).
+const u64 kNodeBits = 1;
 
 const u64 kEdgeBytes = NEDGES / 8;                       // 512 MiB at C32
-const u64 kNodeBytes = ((NEDGES >> PART_BITS) * kNodeBits) / 8;   // 1 GiB at PART_BITS=0
+const u64 kNodeBytes = ((NEDGES >> PART_BITS) * kNodeBits) / 8;   // 512 MiB at PART_BITS=0
 const u32 kPartMask = (1u << PART_BITS) - 1u;
 const u32 kNonPartBits = EDGEBITS - PART_BITS;
 
@@ -92,31 +100,35 @@ __device__ __forceinline__ void alive_kill(u32* alive, u64 nonce) {
     alive[nonce >> 5] |= (1u << (nonce & 31));
 }
 
-// CH-7 (bug fix): the "nonleaf" bitmap must answer "does this node have at least
-// TWO alive edges?", because edge trimming removes edges whose endpoint is a leaf
-// (degree 1). Upstream `src/cuckatoo/lean.cu` instead uses a SINGLE bit per node
-// and tests `nonleaf.test((u & NONPART_MASK) ^ 1)`:
-//   * a single bit can only express "degree >= 1", so it cannot detect a leaf;
-//   * `^ 1` tests a DIFFERENT (effectively random) node than the one that was set,
-//     which turns the kill into an unbiased ~37% random edge deletion each round.
-// Random deletion destroys long cycles, which is exactly what we measured:
-// 0 solutions in 24 C32 graphs and 0 in 40 C29 graphs, while short cycles
-// (2, 22) still appeared.
+// CH-7 (corrected): the trimming rule must be the *partner-slot* test, exactly as
+// in Grin's own lean miner (`core/src/pow/lean.rs::count_and_kill`) and upstream
+// `src/cuckatoo/lean.cu`: kill an edge when the raw endpoint value `w` of the
+// processed side has no alive counterpart at `w ^ 1`.
 //
-// The fix is the structure Tromp himself uses in the working `src/cuckoo/lean.cu`
-// (`twice_set`): two bits per node, bit 0 = "has an alive edge", bit 1 = "has at
-// least two". `nonleaf_set2` is `twice_set::set` and `nonleaf_deg2` is
-// `twice_set::test`, so the leaf test becomes `!nonleaf_deg2(u)`, with no `^ 1`.
-// Cost: 2 bits per node == 1 GiB at C32 instead of 512 MiB.
-__device__ __forceinline__ void nonleaf_set2(u32* nonleaf, word_t u) {
-    const word_t idx = u >> 4;                  // 16 nodes per 32-bit word
-    const u32 bit = 1u << (2 * (u & 15));
-    const u32 old = atomicOr(&nonleaf[idx], bit);
-    const u32 bit2 = bit << 1;
-    if ((old & (bit2 | bit)) == bit) atomicOr(&nonleaf[idx], bit2);
+// Why `^ 1` is correct here (and not a degree counter): a Cuckatoo NODE is
+// `sipnode(...) >> 1` and the dropped low bit is a two-slot parity that
+// grin_verify requires to DIFFER between the two cycle edges meeting at that node.
+// Grin's consensus verifier matches half-edges by `uvs >> 1` and rejects a match
+// whose raw values are equal (`POW_DEAD_END`), and grin_verify accepts Grin's
+// published Cuckatoo32 vector V1_32 exactly under that reading (its 42 u-endpoints
+// form 21 pairs {x, x^1}). "The other slot of the same node" is therefore literally
+// `w ^ 1`, and keeping both slots occupied is the only rule under which a cycle
+// survives trimming - the partner slot of a cycle edge is occupied by the next
+// edge of the same cycle, so no cycle edge is ever killed.
+//
+// The earlier CH-7 revision replaced this with cuckoo's `twice_set` degree >= 2
+// counter. That is right for Cuckoo Cycle (a single node space, where the node IS
+// the raw value) but wrong for Cuckatoo: two edges at the SAME raw value say
+// nothing about the partner slot. Measured at EDGEBITS=20/PROOFSIZE=6, 16 trims:
+// the degree rule leaves ~3900 edges but only 1 node in partition 0 (0 in
+// partition 1) with both slots occupied, so no verify-valid cycle can exist in it
+// and raw_cycles is 0 by construction. With the partner-slot rule the same graphs
+// leave ~3600 edges with ~3400 two-slot nodes and yield verified 6-cycles.
+__device__ __forceinline__ void slot_seen_set(u32* seen, word_t w) {
+    atomicOr(&seen[w >> 5], 1u << (w & 31));
 }
-__device__ __forceinline__ bool nonleaf_deg2(const u32* nonleaf, word_t u) {
-    return ((nonleaf[u >> 4] >> (2 * (u & 15))) & 2u) != 0;
+__device__ __forceinline__ bool slot_seen_test(const u32* seen, word_t w) {
+    return ((seen[w >> 5] >> (w & 31)) & 1u) != 0;
 }
 
 __device__ __forceinline__ bool safe_shift32(u32& v, u32 ffs) {
@@ -142,7 +154,7 @@ __global__ void count_node_deg(siphash_keys sipkeys, const u32* alive, u32* nonl
             safe_shift32(alive32, ffs);
             const word_t u = (word_t)dipnode(sipkeys, nonce, uorv);
             if (in_partition(u, part)) {
-                nonleaf_set2(nonleaf, (word_t)(u & kNonPartMask));
+                slot_seen_set(nonleaf, (word_t)(u & kNonPartMask));
             }
         }
     }
@@ -160,7 +172,8 @@ __global__ void kill_leaf_edges(siphash_keys sipkeys, u32* alive, const u32* non
             nonce += ffs;
             safe_shift32(alive32, ffs);
             const word_t u = (word_t)dipnode(sipkeys, nonce, uorv);
-            if (in_partition(u, part) && !nonleaf_deg2(nonleaf, (word_t)(u & kNonPartMask))) {
+            if (in_partition(u, part) &&
+                !slot_seen_test(nonleaf, (word_t)((u & kNonPartMask) ^ 1))) {
                 alive_kill(alive, nonce);
             }
         }
@@ -309,6 +322,7 @@ struct LeanSolver::Impl {
         // The finder reports a clean failure when the graph does not fit its node
         // table, instead of the silent corruption the old compressor produced.
         if (!finder.build(h_bits, (uint64_t)NEDGES, sipkeys, fp, error)) {
+            last.edges_after_trim = finder.stats().alive_edges;
             last.trim_ms = t_trim - t_start;
             last.find_cycles_ms = 0.0;
             last.total_ms = now_ms() - t_start;
@@ -325,6 +339,11 @@ struct LeanSolver::Impl {
         last.raw_cycles = (uint64_t)nsol;
         last.search_capped = capped;
         last.search_steps = finder.stats().steps;
+        print_log("  finder: edges=%llu nodes=%llu full_slot_nodes=%llu steps=%llu cap=%d\n",
+                  (unsigned long long)finder.stats().alive_edges,
+                  (unsigned long long)finder.stats().nodes,
+                  (unsigned long long)finder.stats().full_nodes,
+                  (unsigned long long)finder.stats().steps, capped ? 1 : 0);
 
         for (int s = 0; s < nsol && found < max_out; ++s) {
             FoundSolution fs;

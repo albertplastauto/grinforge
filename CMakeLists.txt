@@ -182,3 +182,31 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/host/main.cpp" AND GRIN_HAVE_MONITOR)
 endif()
 
 message(STATUS "grinforge: CUDA architectures = ${CMAKE_CUDA_ARCHITECTURES}")
+
+# ---------------------------------------------------------------------------
+# Incremental-build safety (measured, not theoretical)
+#
+# Ninja tracks the solver headers for the CUDA targets but NOT for the C++
+# targets that include `solver/lean_solver.hpp` (tools/solver_bench.cpp and
+# src/host/main.cpp): touching lean_solver.hpp relinks those executables without
+# recompiling their objects. A stale object then disagrees with the solver
+# library about the layout of `grin::SolverConfig` / `grin::LastRun`, and:
+#   * `SolverConfig::max_search_steps` is read as an uninitialised 0, so the
+#     cycle search is capped at zero steps and every graph reports raw_cycles=0
+#     (indistinguishable from "the finder is broken");
+#   * `last_run()` returns the new, larger LastRun into the caller's smaller
+#     temporary, corrupting the caller's stack (observed: STATUS_HEAP_CORRUPTION
+#     and ACCESS_VIOLATION in solver_bench_tiny).
+# Both were observed in a real incremental run of build\build_all.bat, so the
+# dependency is declared explicitly here. A clean build is also fine, of course.
+set(GRIN_SOLVER_HEADERS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/solver/lean_solver.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/solver/cycle_finder.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/solver/grin_params.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/solver/grin_verify.hpp"
+)
+foreach(_grin_src tools/solver_bench.cpp tools/simple_ref.cpp src/host/main.cpp)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_grin_src}")
+    set_property(SOURCE "${_grin_src}" APPEND PROPERTY OBJECT_DEPENDS "${GRIN_SOLVER_HEADERS}")
+  endif()
+endforeach()
