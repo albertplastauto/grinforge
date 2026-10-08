@@ -92,7 +92,30 @@ struct Config {
 
     uint16_t api_port = 4068;               // 0 disables the HTTP API
     bool     api_bind_all = false;          // expose the API to the LAN
+
+    // Wallet guard: if this list is non-empty, the miner refuses to start unless the
+    // address inside --user is one of these. This is what makes a silently tampered
+    // .bat file or config file unable to redirect mining to somebody else's wallet.
+    std::vector<std::string> allowed_addresses;
 };
+
+// Split "<wallet>.<worker>". GRIN bech32 addresses contain no '.', so the first dot
+// separates the address from the worker name.
+inline void split_login(const std::string& login, std::string& address, std::string& worker) {
+    const size_t dot = login.find('.');
+    address = (dot == std::string::npos) ? login : login.substr(0, dot);
+    worker = (dot == std::string::npos) ? std::string() : login.substr(dot + 1);
+}
+
+// GRIN mainnet addresses are bech32: "grin1" plus 58 characters, 63 in total.
+inline bool looks_like_grin_address(const std::string& a) {
+    if (a.size() != 63) return false;
+    if (a.compare(0, 5, "grin1") != 0) return false;
+    for (char c : a) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z'))) return false;
+    }
+    return true;
+}
 
 void usage() {
     std::printf(
@@ -101,6 +124,8 @@ void usage() {
         "  --pool <host:port>            pool address (repeatable; later ones are failover)\n"
         "  --user <wallet.worker>        pool login\n"
         "  --pass <password>             pool password (default: x)\n"
+        "  --allow-address <grin1...>    wallet guard: refuse to start unless the address\n"
+        "                                inside --user is exactly this one (repeatable)\n"
         "  --device <n>                  CUDA device index (default 0)\n"
         "  --ntrims <n>                  edge trimming rounds (default 128)\n"
         "  --blocks <n> --tpb <n>        kernel launch geometry (default 128 128)\n"
@@ -134,6 +159,7 @@ void apply_setting(Config& c, const std::string& key, const std::string& value) 
     auto num = [&]() { return std::strtoll(value.c_str(), nullptr, 10); };
     if (key == "pool") { PoolSpec p; if (parse_pool(value, p)) c.pools.push_back(p); }
     else if (key == "user") c.user = value;
+    else if (key == "allow-address") c.allowed_addresses.push_back(value);
     else if (key == "pass") c.pass = value;
     else if (key == "device") c.device = (int)num();
     else if (key == "ntrims") c.ntrims = (uint32_t)num();
@@ -190,6 +216,7 @@ bool parse_args(Config& c, int argc, char** argv) {
         else if (a == "--config") { if (!load_config_file(c, next("--config"))) return false; }
         else if (a == "--pool") { PoolSpec p; if (!parse_pool(next("--pool"), p)) { std::printf("bad pool\n"); return false; } c.pools.push_back(p); }
         else if (a == "--user") c.user = next("--user");
+        else if (a == "--allow-address") c.allowed_addresses.push_back(next("--allow-address"));
         else if (a == "--pass") c.pass = next("--pass");
         else if (a == "--device") c.device = std::atoi(next("--device"));
         else if (a == "--ntrims") c.ntrims = (uint32_t)std::strtoul(next("--ntrims"), nullptr, 10);
@@ -266,6 +293,56 @@ int main(int argc, char** argv) {
     // (Adding it unconditionally produced a two-entry list containing the same
     // pool twice, which made failover rotate onto the pool that just failed.)
     if (cfg.pools.empty()) cfg.pools.push_back(PoolSpec{});
+
+    // ---- wallet guard -----------------------------------------------------
+    // Downloaded miner bundles are known to ship .bat files carrying somebody
+    // else's address; if such a file is run, the mining silently pays a stranger.
+    // With --allow-address the miner refuses to start unless the address it is
+    // about to mine to is exactly the one the operator intends.
+    if (cfg.bench_seconds <= 0.0) {
+        if (cfg.user.empty()) {
+            std::printf("--user <wallet.worker> is required (or --bench-seconds for a dry run)\n");
+            return 2;
+        }
+        std::string walletAddress, workerName;
+        split_login(cfg.user, walletAddress, workerName);
+
+        std::printf("mining to address: %s\n", walletAddress.c_str());
+        if (!workerName.empty()) std::printf("worker name:       %s\n", workerName.c_str());
+        if (!looks_like_grin_address(walletAddress)) {
+            std::printf("WARNING: this does not look like a GRIN mainnet address "
+                        "(expected \"grin1\" + 58 chars = 63 total).\n"
+                        "         Check very carefully what you are mining to.\n");
+        }
+
+        if (!cfg.allowed_addresses.empty()) {
+            bool allowed = false;
+            for (const auto& a : cfg.allowed_addresses) {
+                if (a == walletAddress) { allowed = true; break; }
+            }
+            if (!allowed) {
+                std::printf(
+                    "\nREFUSING TO START: the address in --user is not in the allowlist.\n"
+                    "  --user address : %s\n", walletAddress.c_str());
+                for (const auto& a : cfg.allowed_addresses) {
+                    std::printf("  allowed        : %s\n", a.c_str());
+                }
+                std::printf(
+                    "This guard exists so that a tampered .bat or config file cannot silently\n"
+                    "redirect your mining to somebody else's wallet. Pass the address you\n"
+                    "actually intend to mine to via --allow-address, or drop the allowlist.\n");
+                return 2;
+            }
+            std::printf("wallet guard:      OK, address matches the allowlist (%zu entr%s)\n",
+                        cfg.allowed_addresses.size(),
+                        cfg.allowed_addresses.size() == 1 ? "y" : "ies");
+        } else {
+            std::printf("wallet guard:      no allowlist set; add\n"
+                        "                     --allow-address %s\n"
+                        "                   to make a silent wallet change impossible.\n",
+                        walletAddress.c_str());
+        }
+    }
 
     std::printf("GrinForge - GRIN Cuckatoo32 miner (0%% dev fee)\n");
     std::printf("================================================\n");
