@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -232,8 +233,25 @@ struct Shared {
     std::atomic<uint64_t> last_progress_unix_ms{0};
 };
 
+std::string timestamp_str() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+    const long ms = (long)(std::chrono::duration_cast<std::chrono::milliseconds>(
+                               now.time_since_epoch())
+                               .count() %
+                           1000);
+    std::tm tm{};
+    localtime_s(&tm, &t);
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03ld", tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
+    return std::string(buf);
+}
+
 void log_line(const std::string& s) {
-    std::printf("[grinforge] %s\n", s.c_str());
+    // Timestamps are not cosmetic here: the pool drops the connection every couple
+    // of minutes and a share submitted just before a drop never gets a response, so
+    // correlating submits with drops is the only way to tell those apart.
+    std::printf("[%s] %s\n", timestamp_str().c_str(), s.c_str());
     std::fflush(stdout);
 }
 
@@ -715,9 +733,10 @@ int main(int argc, char** argv) {
             lastAttempts = attempts;
             const auto s = get_client()->stats();
 
-            std::printf("[%-8s] %6.3f GPS | graphs %-7llu sol %-4llu sub %-4llu "
+            std::printf("[%s] [%-8s] %6.3f GPS | graphs %-7llu sol %-4llu sub %-4llu "
                         "acc %-4llu rej %-4llu ovl %-6llu fail %-4llu | ",
-                        gps > 0 ? "mining" : "idle", gps, (unsigned long long)attempts,
+                        timestamp_str().c_str(), gps > 0 ? "mining" : "idle", gps,
+                        (unsigned long long)attempts,
                         (unsigned long long)shared.solutions.load(),
                         (unsigned long long)shared.submitted.load(),
                         (unsigned long long)s.accepted, (unsigned long long)s.rejected,
