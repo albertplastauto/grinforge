@@ -302,6 +302,11 @@ Verified on this machine:
 The guard is **a separate small scheduled task, not the miner**: the mining process itself
 still runs without administrator rights (see the privileges section).
 
+It is launched through `tools\run-hidden.vbs` (`wscript.exe`) rather than `powershell.exe`
+directly. A scheduled PowerShell task creates a console window that flashes on screen
+every minute, and `-WindowStyle Hidden` does not prevent it — the first version of the
+installer did exactly that. `wscript` has no console at all, so nothing is visible.
+
 ```bat
 :: lift the cap right now without waiting for the next minute
 gpu-unlock.bat                     :: or nvidia-smi --reset-gpu-clocks
