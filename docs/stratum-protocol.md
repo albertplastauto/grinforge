@@ -121,11 +121,55 @@ identified. Do not reorder or normalise these bytes — hash them as delivered.
 schema. Use it to verify a client without submitting shares.
 `tools/pre_pow_analyze.py` dumps a `pre_pow` blob byte-by-byte with offsets.
 
-## 6. Still unverified (confirm before shipping)
+## 6. Разрешено: какую форму `pow` пул действительно принимает
 
-1. Which `pow` envelope 2Miners actually accepts — only a real share submission
-   proves it. We implement both and log the server's rejection reason.
-2. Whether 2Miners enforces a minimum difficulty above 1 for share credit; the
-   job advertises `difficulty: 1`.
-3. Nonce allocation strategy expected by the pool (any u64 appears acceptable;
-   the pool reconstructs the header from `pre_pow` + `nonce`).
+Первая реальная отправка (шара `lz=6`, сложность 1 048 576) прошла **формой с ключом
+`Cuckoo`** — и пул не ответил вообще: ни `accepted`, ни `rejected`. Локально
+`total_accepted_shares` остался 0, а публичный API пула не показал у нашего кошелька
+ни `currentHashrates`, ни воркера в списке активных майнеров. То есть форму с ключом
+пул молча игнорирует.
+
+Решает эталонный клиент `client8568/High-Resource-Cuckatoo-Miner` (MIT), который
+известно работает с этим пулом. Его `Makefile`:
+
+```
+STRATUM_SERVER_USES_MORE_THAN_ONE_MINING_ALGORITHM = false
+```
+
+При `false` в `main.cpp` выбирается ветка `#else`, то есть **плоская** форма:
+
+```json
+{"id":"1","jsonrpc":"2.0","method":"submit","params":{"edge_bits":32,"height":438...,"job_id":0,"nonce":...,"pow":[e0,...,e41]}}
+```
+
+`edge_bits` при этом стоит на верхнем уровне `params`, а `pow` — просто массив.
+**Эта форма и выбрана значением по умолчанию** в нашем клиенте
+(`Config::use_edge_bits_submit_form = true`). Форма с ключом `Cuckoo` осталась как
+автоматический fallback на случай отказа «malformed».
+
+### Что ещё подтверждено публичным API пула
+
+`https://grin.2miners.com/api/stats`:
+
+| Поле | Значение | Смысл |
+|---|---|---|
+| `minDiff` | **16384** | минимальная сложность шары = `graph_weight(32)`. Наша шара с `lz=6` имеет сложность 1 048 576 — в 64 раза выше минимума, то есть дело не в сложности |
+| `netdiff` | 88 837 534 | сложность сети |
+| `nethr` | 3486 | хешрейт сети в GPS |
+| `minersTotal` / `workersTotal` | 141 / 419 | пул целиком |
+
+### Поведение соединения
+
+Пул закрывает TCP-соединение примерно каждые **110 секунд** (RST, Winsock 10054) —
+это его политика, а не ошибка клиента: keepalive каждые 10 с получает `result: ok`,
+job'ы приходят регулярно. Клиент переподключается за 1 с. Риск в том, что шара,
+отправленная непосредственно перед разрывом, остаётся без ответа — именно это и
+произошло с первой отправкой. По этой причине все строки лога майнера несут метки
+времени: без них корреляцию отправок с разрывами измерить нельзя.
+
+## 7. Ещё не проверено
+
+1. Приём шары пулом в новой (плоской) форме — нужен следующий найденный цикл.
+   Статистика на странице пула появляется с задержкой около 20 минут.
+2. Порог минимальной сложности шары для зачёта: `minDiff` равен 16384, наши шары
+   стартуют от 16384 · 2^lz, то есть проходят с запасом.

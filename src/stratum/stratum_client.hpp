@@ -77,7 +77,19 @@ public:
         int keepalive_seconds = 10;
         int io_timeout_seconds = 60;  // receive/send timeout
         int reconnect_delay_seconds = 1;
-        bool use_edge_bits_submit_form = false;  // false => {"pow":{"Cuckoo":[32,[...]]}}
+        // Which `pow` envelope to submit with.
+        //   true  -> {"edge_bits":32,"height":H,"job_id":J,"nonce":N,"pow":[e0..e41]}
+        //   false -> {"height":H,"job_id":J,"nonce":N,"pow":{"Cuckoo":[32,[e0..e41]]}}
+        //
+        // Default true, because that is what the known-working reference client for
+        // this pool actually sends: its Makefile sets
+        // STRATUM_SERVER_USES_MORE_THAN_ONE_MINING_ALGORITHM = false, which selects
+        // the #else branch, i.e. the flat `pow` array with a top-level `edge_bits`.
+        // Our first real share was sent in the Cuckoo-keyed form and the pool
+        // silently ignored it (no response, no credited hashrate), which is what
+        // prompted this change. The other form is still used as an automatic
+        // fallback if the pool ever rejects this one as malformed.
+        bool use_edge_bits_submit_form = true;
     };
 
     using JobCallback = std::function<void(const Job&)>;

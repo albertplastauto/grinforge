@@ -199,14 +199,31 @@ message(STATUS "grinforge: CUDA architectures = ${CMAKE_CUDA_ARCHITECTURES}")
 #     and ACCESS_VIOLATION in solver_bench_tiny).
 # Both were observed in a real incremental run of build\build_all.bat, so the
 # dependency is declared explicitly here. A clean build is also fine, of course.
-set(GRIN_SOLVER_HEADERS
+set(GRIN_PROJECT_HEADERS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/solver/lean_solver.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/solver/cycle_finder.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/solver/grin_params.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/solver/grin_verify.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/stratum/stratum_client.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/monitor/telemetry.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/monitor/gpu_control.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/host/http_api.hpp"
 )
-foreach(_grin_src tools/solver_bench.cpp tools/simple_ref.cpp src/host/main.cpp)
+
+# Every host source, so a header edit always triggers recompilation. Sources that
+# do not exist in a given checkout are skipped.
+set(GRIN_HOST_SOURCES
+  tools/solver_bench.cpp
+  tools/simple_ref.cpp
+  tools/stratum_client_test.cpp
+  src/host/main.cpp
+  src/host/http_api.cpp
+  src/stratum/stratum_client.cpp
+  src/monitor/telemetry.cpp
+  src/monitor/gpu_control.cpp
+)
+foreach(_grin_src ${GRIN_HOST_SOURCES})
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_grin_src}")
-    set_property(SOURCE "${_grin_src}" APPEND PROPERTY OBJECT_DEPENDS "${GRIN_SOLVER_HEADERS}")
+    set_property(SOURCE "${_grin_src}" APPEND PROPERTY OBJECT_DEPENDS "${GRIN_PROJECT_HEADERS}")
   endif()
 endforeach()
