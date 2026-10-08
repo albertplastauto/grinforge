@@ -1,3 +1,7 @@
+// GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+// Copyright (c) 2026 albertplastauto
+// SPDX-License-Identifier: MIT
+//
 #pragma once
 //
 // gpu_control.hpp - power limit / clock / fan / undervolt control for the GRIN

@@ -1,3 +1,7 @@
+// GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+// Copyright (c) 2026 albertplastauto
+// SPDX-License-Identifier: MIT
+//
 #pragma once
 //
 // telemetry.hpp - read-only GPU telemetry for the GRIN Cuckatoo32 miner (Windows x64).

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+# Copyright (c) 2026 albertplastauto
+# SPDX-License-Identifier: MIT
+#
 """Independent Python implementation of the siphash variant used by Cuckoo Cycle.
 
 Purpose: cross-check the C++ `siphash_keys` / `sipnode` against a completely

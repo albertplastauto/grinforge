@@ -97,6 +97,14 @@ hashrates        -> {"32":0.07}
 Требуется: Visual Studio 2026 с workload «Desktop development with C++»,
 CUDA Toolkit 13.x, CMake ≥ 3.24 (идёт в поставке VS).
 
+Одной командой (поправьте `VSDIR` / `CUDAROOT` внутри, если у вас другие пути):
+
+```bat
+scripts\build_all.bat
+```
+
+Вручную:
+
 ```bat
 cmake -S . -B build\cmake -G Ninja ^
       -DCMAKE_BUILD_TYPE=Release ^
@@ -104,8 +112,9 @@ cmake -S . -B build\cmake -G Ninja ^
 cmake --build build\cmake
 ```
 
-Артефакты: `grinforge.exe` (майнер), `solver_bench.exe` (замер GPS),
-`selftest.exe` (проверка криптоядра), `stratum_client_test.exe` (проверка протокола).
+Артефакты в `build\cmake\`: `grinforge.exe` (майнер), `solver_bench.exe` (замер GPS и
+самопроверка), `solver_bench_tiny.exe` / `solver_bench29.exe` (окна поиска циклов),
+`stratum_client_test.exe` (живая проверка протокола).
 
 ## Проверка корректности
 
@@ -114,9 +123,10 @@ cmake --build build\cmake
 находит ни одной шары:
 
 ```bat
-build\selftest.exe                                     && rem BLAKE2b KAT, раскладка заголовка
-python tools\check_keys.py <476 hex pre_pow> <nonce>   && rem независимый BLAKE2b (hashlib)
-python tools\check_siphash.py --selftest               && rem независимый siphash на Python
+build\cmake\solver_bench.exe --selftest                  :: BLAKE2b KAT, раскладка заголовка
+build\cmake\solver_bench.exe --pre-pow-file build\job.txt --device-check
+python tools\check_keys.py <476 hex pre_pow> <nonce>     :: независимый BLAKE2b (hashlib)
+python tools\check_siphash.py --selftest                 :: независимый siphash на Python
 ```
 
 Все три совпадают с реализацией на C++/CUDA.

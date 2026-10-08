@@ -1,3 +1,7 @@
+// GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+// Copyright (c) 2026 albertplastauto
+// SPDX-License-Identifier: MIT
+//
 // Cycle search for the trimmed Cuckatoo graph — the replacement for the
 // `graph.hpp` + `compress.hpp` + `add_compress_edge` stage.
 //

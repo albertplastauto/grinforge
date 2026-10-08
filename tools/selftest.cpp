@@ -1,3 +1,7 @@
+// GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+// Copyright (c) 2026 albertplastauto
+// SPDX-License-Identifier: MIT
+//
 // Crypto/parameter self-test. Deliberately CUDA-free so it can be built and run
 // before the CUDA toolkit is present, and so the header/key derivation can be
 // cross-checked against an independent BLAKE2b implementation (Python hashlib).

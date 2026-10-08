@@ -1,3 +1,9 @@
+// GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+// Modifications Copyright (c) 2026 albertplastauto
+// Portions derived from tromp/cuckoo, Copyright (c) 2013-2020 John Tromp,
+// distributed under "The FAIR MINING License" (see LICENSE).
+// SPDX-License-Identifier: LicenseRef-Fair-Mining
+//
 // Host-side verification of a Cuckatoo cycle, plus GRIN's difficulty metric.
 //
 // PROVENANCE

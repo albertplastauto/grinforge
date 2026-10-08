@@ -1,4 +1,8 @@
 @echo off
+rem GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+rem Copyright (c) 2026 albertplastauto
+rem SPDX-License-Identifier: MIT
+rem
 rem Undo gpu-lock-2500.bat and put the GPU back under driver control.
 rem REQUIRES ADMINISTRATOR RIGHTS. Not persistent, but neither is the lock.
 setlocal

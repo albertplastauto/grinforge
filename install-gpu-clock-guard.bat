@@ -1,4 +1,8 @@
 @echo off
+rem GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+rem Copyright (c) 2026 albertplastauto
+rem SPDX-License-Identifier: MIT
+rem
 rem Install the automatic GPU clock guard: cap 2500 MHz while grinforge.exe runs,
 rem full boost otherwise (games, video). Replaces the plain logon cap task, which left
 rem the limit applied all the time.

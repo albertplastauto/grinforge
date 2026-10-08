@@ -1,3 +1,7 @@
+# GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+# Copyright (c) 2026 albertplastauto
+# SPDX-License-Identifier: MIT
+#
 cmake_minimum_required(VERSION 3.24)
 
 # GrinForge — open-source GRIN Cuckatoo32 GPU miner, no developer fee.

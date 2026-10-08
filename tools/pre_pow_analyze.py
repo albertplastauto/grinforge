@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+# Copyright (c) 2026 albertplastauto
+# SPDX-License-Identifier: MIT
+#
 """Decode a GRIN stratum pre_pow blob and figure out its real layout.
 
 Usage: python pre_pow_analyze.py <hex> [<hex2> ...]

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+# Copyright (c) 2026 albertplastauto
+# SPDX-License-Identifier: MIT
+#
 """Independent cross-check of the GRIN header -> siphash key derivation.
 
 Uses Python's hashlib (a completely separate BLAKE2b implementation) to compute

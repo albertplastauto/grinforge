@@ -1,3 +1,7 @@
+// GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+// Copyright (c) 2026 albertplastauto
+// SPDX-License-Identifier: MIT
+//
 //
 // gpu_control.cpp - NVAPI (no SDK, dynamically resolved) and nvidia-smi control path.
 //

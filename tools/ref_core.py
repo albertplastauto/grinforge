@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+# Copyright (c) 2026 albertplastauto
+# SPDX-License-Identifier: MIT
+#
 """Fully independent reference for the Cuckoo Cuckatoo pipeline (CPU, Python).
 
 Written from the definitions, sharing no code with the C++/CUDA solver apart from

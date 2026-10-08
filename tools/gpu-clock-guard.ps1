@@ -1,3 +1,7 @@
+# GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+# Copyright (c) 2026 albertplastauto
+# SPDX-License-Identifier: MIT
+#
 # GPU clock guard: keep the 2500 MHz boost cap applied ONLY while the miner runs.
 #
 # Why this exists: the cap is worth ~3-7 W (same hashrate, slightly better GPS/W), which

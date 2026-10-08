@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+# Copyright (c) 2026 albertplastauto
+# SPDX-License-Identifier: MIT
+#
 """Probe the GRIN stratum protocol spoken by a pool.
 
 Read-only diagnostic: connects, performs the standard GRIN stratum handshake

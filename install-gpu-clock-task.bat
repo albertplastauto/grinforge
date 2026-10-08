@@ -1,4 +1,8 @@
 @echo off
+rem GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+rem Copyright (c) 2026 albertplastauto
+rem SPDX-License-Identifier: MIT
+rem
 rem Make the 2500 MHz core-clock cap survive reboots, by running gpu-lock-2500.bat at
 rem every logon with the highest privileges available.
 rem REQUIRES ADMINISTRATOR RIGHTS. Reversible: see the uninstall command below.

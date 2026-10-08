@@ -1,4 +1,8 @@
 @echo off
+rem GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+rem Copyright (c) 2026 albertplastauto
+rem SPDX-License-Identifier: MIT
+rem
 rem Cap the RTX 4060 Ti core clock at 2500 MHz (boost ceiling, idle still allowed).
 rem
 rem WHY 2500: measured on this card with `grinforge --tune` (see

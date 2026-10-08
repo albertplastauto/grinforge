@@ -1,3 +1,7 @@
+// GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+// Copyright (c) 2026 albertplastauto
+// SPDX-License-Identifier: MIT
+//
 // Independent CPU reference for the Cuckoo Cycle pipeline.
 //
 // This deliberately shares NOTHING with the GPU solver except the header/key

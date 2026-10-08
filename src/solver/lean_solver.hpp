@@ -1,3 +1,7 @@
+// GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+// Copyright (c) 2026 albertplastauto
+// SPDX-License-Identifier: MIT
+//
 // Public interface of the Cuckatoo32 "lean" GPU solver.
 //
 // The solver is a port of tromp/cuckoo `src/cuckatoo/lean.cu`

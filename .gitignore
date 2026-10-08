@@ -9,6 +9,9 @@ build/
 *.dll
 *.log
 
+# Long-run miner logs (created by run-miner-forever.ps1)
+logs/
+
 # CMake / IDE
 cmake-build-*/
 .vs/
