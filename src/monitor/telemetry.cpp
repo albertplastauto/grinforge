@@ -124,6 +124,7 @@ struct NvmlApi {
     NvmlReturn(__cdecl* device_get_current_clocks_throttle_reasons)(NvmlDevice device, unsigned long long* reasons) = nullptr;
     NvmlReturn(__cdecl* device_get_pcie_throughput)(NvmlDevice device, int counter, unsigned* kb_per_s) = nullptr;
     NvmlReturn(__cdecl* device_get_field_values)(NvmlDevice device, int count, NvmlFieldValue* values) = nullptr;
+    NvmlReturn(__cdecl* system_get_driver_version)(char* version, unsigned length) = nullptr;
     const char*(__cdecl* error_string)(NvmlReturn result) = nullptr;
 
     // True when the indispensable entry points were resolved.
@@ -164,6 +165,7 @@ struct TelemetryState {
 
     std::vector<NvmlDevice>  handles;  // NVML backend
     std::vector<std::string> names;
+    std::string driver_version;              // filled at init; empty when unknown
     std::vector<double>      cached_min_w;  // power-management limit constraints
     std::vector<double>      cached_max_w;
 
@@ -477,6 +479,8 @@ NvmlApi load_nvml() {
         reinterpret_cast<NvmlReturn(__cdecl*)(NvmlDevice, int, unsigned*)>(resolve("nvmlDeviceGetPcieThroughput"));
     api.device_get_field_values =
         reinterpret_cast<NvmlReturn(__cdecl*)(NvmlDevice, int, NvmlFieldValue*)>(resolve("nvmlDeviceGetFieldValues"));
+    api.system_get_driver_version =
+        reinterpret_cast<NvmlReturn(__cdecl*)(char*, unsigned)>(resolve("nvmlSystemGetDriverVersion"));
     api.error_string = reinterpret_cast<const char*(__cdecl*)(NvmlReturn)>(resolve("nvmlErrorString"));
     return api;
 }
@@ -985,6 +989,15 @@ bool Telemetry::init(std::string& error) {
                     }
                     if (enumeration_ok) {
                         g_state.nvml = api;
+                        // Record the driver this run is bound to: every result in the
+                        // project is tied to a specific driver version, so the log
+                        // should name it instead of relying on documentation.
+                        if (api.system_get_driver_version != nullptr) {
+                            char driver[80] = {0};
+                            if (api.system_get_driver_version(driver, sizeof(driver)) == 0) {
+                                g_state.driver_version.assign(driver);
+                            }
+                        }
                         g_state.backend = Backend::Nvml;
                         g_state.ready = true;
                         return true;
@@ -1047,6 +1060,7 @@ void Telemetry::shutdown() {
         g_state.smi_cache_index = 0;
         g_state.smi_cache_value = GpuTelemetry{};
         g_state.smi_path.clear();
+        g_state.driver_version.clear();
         g_state.backend = Backend::None;
         g_state.ready = false;
         g_state.initialised = false;
@@ -1145,8 +1159,16 @@ bool Telemetry::read_thermal_limits(unsigned index, ThermalLimits& out, std::str
     }
 }
 
-const char* Telemetry::backend_name() {
+std::string Telemetry::driver_version() {
     try {
+        std::shared_lock<std::shared_mutex> lock(g_state.mutex);
+        return g_state.driver_version;
+    } catch (...) {
+        return std::string();
+    }
+}
+
+const char* Telemetry::backend_name() {    try {
         std::shared_lock<std::shared_mutex> lock(g_state.mutex);
         switch (g_state.backend) {
             case Backend::Nvml:

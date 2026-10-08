@@ -112,6 +112,11 @@ public:
 
     // "nvml", "nvidia-smi" or "none".
     static const char* backend_name();
+
+    // NVIDIA display driver version as reported by NVML (e.g. "617.14"), or an empty
+    // string when unknown. Every measurement in this project is bound to a specific
+    // driver, so the miner prints this at startup and records it in its log.
+    static std::string driver_version();
 };
 
 } // namespace grin

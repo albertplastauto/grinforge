@@ -434,6 +434,12 @@ int main(int argc, char** argv) {
     if (grin::Telemetry::init(error)) {
         std::printf("telemetry backend: %s, %zu device(s)\n", grin::Telemetry::backend_name(),
                     grin::Telemetry::device_count());
+        // Bind this run to the driver it is measured on: every number in the project is
+        // tied to a specific driver (docs/validated-environment.md), so the log should
+        // state it instead of leaving it to documentation.
+        const std::string driverVersion = grin::Telemetry::driver_version();
+        std::printf("nvidia driver:     %s\n",
+                    driverVersion.empty() ? "unknown" : driverVersion.c_str());
     } else {
         std::printf("telemetry unavailable: %s (mining continues without monitoring)\n",
                     error.c_str());
