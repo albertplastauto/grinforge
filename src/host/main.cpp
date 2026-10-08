@@ -26,6 +26,7 @@
 
 #include <windows.h>
 
+#include "host/http_api.hpp"
 #include "monitor/gpu_control.hpp"
 #include "monitor/telemetry.hpp"
 #include "solver/lean_solver.hpp"
@@ -87,6 +88,9 @@ struct Config {
     double   bench_seconds = 0.0;           // >0 = run without a pool, for measurement
     std::string bench_pre_pow_file;
     double   report_seconds = 5.0;
+
+    uint16_t api_port = 4068;               // 0 disables the HTTP API
+    bool     api_bind_all = false;          // expose the API to the LAN
 };
 
 void usage() {
@@ -107,6 +111,8 @@ void usage() {
         "  --undervolt-voltage <uv>      voltage offset in microvolts (e.g. -50000)\n"
         "  --fan <percent>               fixed fan speed (0 = restore automatic)\n"
         "  --report <seconds>            dashboard interval (default 5)\n"
+        "  --api-port <port>             HTTP monitoring API on 127.0.0.1 (default 4068, 0 = off)\n"
+        "  --api-bind-all                expose the API on all interfaces (not just loopback)\n"
         "  --bench-seconds <s>           run the solver without a pool for s seconds\n"
         "  --bench-pre-pow <file>        file holding a captured pre_pow for --bench-seconds\n"
         "  --config <file>               read key=value settings from a file\n"
@@ -140,6 +146,8 @@ void apply_setting(Config& c, const std::string& key, const std::string& value) 
     else if (key == "undervolt-voltage") { c.apply_undervolt = true; c.undervolt.voltage_offset_uv = (int)num(); }
     else if (key == "fan") c.fan_percent = (int)num();
     else if (key == "report") c.report_seconds = std::strtod(value.c_str(), nullptr);
+    else if (key == "api-port") c.api_port = (uint16_t)num();
+    else if (key == "api-bind-all") c.api_bind_all = (num() != 0);
     else if (key == "bench-seconds") c.bench_seconds = std::strtod(value.c_str(), nullptr);
     else if (key == "bench-pre-pow") c.bench_pre_pow_file = value;
     else std::printf("warning: unknown config key '%s'\n", key.c_str());
@@ -194,6 +202,8 @@ bool parse_args(Config& c, int argc, char** argv) {
         else if (a == "--undervolt-voltage") { c.apply_undervolt = true; c.undervolt.voltage_offset_uv = std::atoi(next("--undervolt-voltage")); }
         else if (a == "--fan") c.fan_percent = std::atoi(next("--fan"));
         else if (a == "--report") c.report_seconds = std::strtod(next("--report"), nullptr);
+        else if (a == "--api-port") c.api_port = (uint16_t)std::strtoul(next("--api-port"), nullptr, 10);
+        else if (a == "--api-bind-all") c.api_bind_all = true;
         else if (a == "--bench-seconds") c.bench_seconds = std::strtod(next("--bench-seconds"), nullptr);
         else if (a == "--bench-pre-pow") c.bench_pre_pow_file = next("--bench-pre-pow");
         else { std::printf("unknown option: %s (try --help)\n", a.c_str()); return false; }
@@ -398,14 +408,15 @@ int main(int argc, char** argv) {
     Shared shared;
     shared.last_progress_unix_ms.store(now_unix_ms());
 
-    auto make_client = [&](size_t poolIndex) {
+    std::mutex clientMutex;
+    auto make_client = [&](size_t poolIndex) -> std::shared_ptr<grin::StratumClient> {
         grin::StratumClient::Config cc;
         cc.host = cfg.pools[poolIndex].host;
         cc.port = cfg.pools[poolIndex].port;
         cc.user = cfg.user;
         cc.pass = cfg.pass;
         cc.agent = "grinforge/0.1";
-        auto client = std::make_unique<grin::StratumClient>(cc);
+        auto client = std::make_shared<grin::StratumClient>(cc);
         client->set_log_callback([](const std::string& s) { log_line("stratum " + s); });
         client->set_job_callback([&shared](const grin::Job& j) {
             std::lock_guard<std::mutex> lock(shared.mutex);
@@ -420,7 +431,13 @@ int main(int argc, char** argv) {
     };
 
     size_t poolIndex = 0;
-    auto client = make_client(poolIndex);
+    std::shared_ptr<grin::StratumClient> client = make_client(poolIndex);
+    // Failover replaces the client object; every other thread must go through
+    // this accessor so it never touches a half-swapped pointer.
+    auto get_client = [&]() -> std::shared_ptr<grin::StratumClient> {
+        std::lock_guard<std::mutex> lock(clientMutex);
+        return client;
+    };
     if (!client->start()) {
         std::printf("could not connect to %s:%u\n", cfg.pools[poolIndex].host.c_str(),
                     cfg.pools[poolIndex].port);
@@ -433,12 +450,72 @@ int main(int argc, char** argv) {
                 std::printf("  %s:%u failed\n", cfg.pools[i].host.c_str(), cfg.pools[i].port);
             }
         }
-        if (!client->is_connected()) {
+        if (!get_client()->is_connected()) {
             std::printf("no pool available\n");
             return 1;
         }
     }
     std::printf("mining on %s:%u\n", cfg.pools[poolIndex].host.c_str(), cfg.pools[poolIndex].port);
+
+    // ---- HTTP monitoring API --------------------------------------------
+    // Shape mirrors GMiner's /stat so existing dashboards and scripts work.
+    const auto processStart = Clock::now();
+    grin::HttpApi api;
+    if (cfg.api_port != 0) {
+        api.start(
+            cfg.api_port, cfg.api_bind_all,
+            [&]() -> std::string {
+                grin::GpuTelemetry t;
+                std::string terr;
+                const bool haveT = grin::Telemetry::read((unsigned)cfg.device, t, terr);
+                const auto s = get_client()->stats();
+                const uint64_t attempts = shared.attempts.load();
+                const double up = seconds_since(processStart);
+                const double gps = up > 0.0 ? (double)attempts / up : 0.0;
+
+                std::string j;
+                j.reserve(1024);
+                j += "{\"miner\":\"GrinForge 0.1\"";
+                j += ",\"uptime\":" + std::to_string((unsigned long long)up);
+                j += ",\"server\":\"" + cfg.pools[poolIndex].host + ":" +
+                     std::to_string(cfg.pools[poolIndex].port) + "\"";
+                j += ",\"user\":\"" + cfg.user + "\"";
+                j += ",\"algorithm\":\"Cuckatoo32\"";
+                j += ",\"speed\":" + std::to_string(gps);
+                j += ",\"speed_unit\":\"GPS\"";
+                j += ",\"attempts\":" + std::to_string((unsigned long long)attempts);
+                j += ",\"solutions\":" + std::to_string((unsigned long long)shared.solutions.load());
+                j += ",\"total_submitted_shares\":" + std::to_string((unsigned long long)shared.submitted.load());
+                j += ",\"total_accepted_shares\":" + std::to_string((unsigned long long)s.accepted);
+                j += ",\"total_rejected_shares\":" + std::to_string((unsigned long long)s.rejected);
+                j += ",\"total_stale_shares\":" + std::to_string((unsigned long long)s.stale);
+                j += ",\"best_leading_zeros\":" + std::to_string((unsigned long long)shared.best_lz.load());
+                j += ",\"connected\":";
+                j += get_client()->is_connected() ? "true" : "false";
+                j += ",\"devices\":[{\"gpu_id\":" + std::to_string(cfg.device);
+                j += ",\"name\":\"" + devName + "\"";
+                j += ",\"speed\":" + std::to_string(gps);
+                j += ",\"accepted_shares\":" + std::to_string((unsigned long long)s.accepted);
+                j += ",\"rejected_shares\":" + std::to_string((unsigned long long)s.rejected);
+                if (haveT) {
+                    j += ",\"temperature\":" + std::to_string((int)t.temperature_c);
+                    j += ",\"fan\":" + std::to_string((int)t.fan_percent);
+                    j += ",\"power_usage\":" + std::to_string(t.power_w);
+                    j += ",\"power_limit\":" + std::to_string(t.power_limit_w);
+                    j += ",\"memory_used_mib\":" +
+                         std::to_string((unsigned long long)(t.memory_used_bytes / (1024 * 1024)));
+                    j += ",\"memory_total_mib\":" +
+                         std::to_string((unsigned long long)(t.memory_total_bytes / (1024 * 1024)));
+                    j += ",\"core_clock\":" + std::to_string((int)t.core_clock_mhz);
+                    j += ",\"memory_clock\":" + std::to_string((int)t.memory_clock_mhz);
+                    j += ",\"utilization_gpu\":" + std::to_string((int)t.utilization_gpu_percent);
+                    j += ",\"throttle_reasons\":" + std::to_string((unsigned long long)t.throttle_reasons);
+                }
+                j += "}]}";
+                return j;
+            },
+            [](const std::string& m) { log_line(m); });
+    }
 
     // ---- mining thread ---------------------------------------------------
     std::atomic<uint64_t> currentGeneration{0};
@@ -520,7 +597,7 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lock(shared.mutex);
                     submitJob = shared.job;
                 }
-                if (client->submit(submitJob, sol)) {
+                if (get_client()->submit(submitJob, sol)) {
                     shared.submitted.fetch_add(1);
                     log_line("submitted solution nonce=" + std::to_string(out[s].nonce) +
                              " lz=" + std::to_string(out[s].cyclehash_leading_zeros));
@@ -562,16 +639,21 @@ int main(int argc, char** argv) {
         }
 
         // Failover if the pool has been unreachable for a while.
-        if (cfg.pools.size() > 1 && !client->is_connected()) {
+        if (cfg.pools.size() > 1 && !get_client()->is_connected()) {
             static int disconnectedPolls = 0;
             if (++disconnectedPolls > 20) {
                 disconnectedPolls = 0;
                 poolIndex = (poolIndex + 1) % cfg.pools.size();
                 log_line("failover: switching to " + cfg.pools[poolIndex].host + ":" +
                          std::to_string(cfg.pools[poolIndex].port));
-                client->stop();
-                client = make_client(poolIndex);
-                client->start();
+                std::shared_ptr<grin::StratumClient> old;
+                {
+                    std::lock_guard<std::mutex> lock(clientMutex);
+                    old = client;
+                    client = make_client(poolIndex);
+                }
+                old->stop();                 // joins the old IO thread outside the lock
+                get_client()->start();
             }
         }
 
@@ -581,7 +663,7 @@ int main(int argc, char** argv) {
             const double interval = cfg.report_seconds;
             const double gps = (double)(attempts - lastAttempts) / interval;
             lastAttempts = attempts;
-            const auto s = client->stats();
+            const auto s = get_client()->stats();
 
             std::printf("[%-8s] %6.3f GPS | attempts %-7llu sol %-4llu sub %-4llu "
                         "acc %-4llu rej %-4llu | ",
@@ -605,7 +687,8 @@ int main(int argc, char** argv) {
     g_stop.store(true);
     solver->request_abort();
     if (miner.joinable()) miner.join();
-    client->stop();
+    api.stop();
+    get_client()->stop();
     if (grin::GpuControl::backend_name()[0] != 'n') grin::GpuControl::restore_defaults();
     grin::Telemetry::shutdown();
     std::printf("stopped. attempts=%llu solutions=%llu submitted=%llu\n",

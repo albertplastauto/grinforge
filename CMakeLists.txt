@@ -106,6 +106,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/host/main.cpp"
    AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/monitor/telemetry.cpp")
   add_executable(grinforge
     src/host/main.cpp
+    src/host/http_api.cpp
     src/stratum/stratum_client.cpp
   )
   target_include_directories(grinforge PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
