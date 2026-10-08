@@ -11,6 +11,7 @@
 //   src/stratum/   GRIN stratum client (see docs/stratum-protocol.md)
 //   src/monitor/   NVML telemetry and NVAPI/nvidia-smi GPU control
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -84,10 +85,12 @@ struct Config {
     uint32_t power_limit_w = 0;
     bool     apply_undervolt = false;
     grin::UndervoltPlan undervolt;
+    int      lock_core_mhz = 0;             // >0 = lock the core clock (needs elevation)
     int      fan_percent = -1;              // -1 = leave alone
 
     double   bench_seconds = 0.0;           // >0 = run without a pool, for measurement
     std::string bench_pre_pow_file;
+    double   tune_seconds = 0.0;            // >0 = sweep GPU profiles and measure each
     double   report_seconds = 5.0;
 
     uint16_t api_port = 4068;               // 0 disables the HTTP API
@@ -135,12 +138,16 @@ void usage() {
         "  --power-limit <w>             set the GPU power limit in watts\n"
         "  --undervolt-core <mhz>        core clock offset for the pstate undervolt\n"
         "  --undervolt-voltage <uv>      voltage offset in microvolts (e.g. -50000)\n"
+        "  --lock-core <mhz>             lock the core clock (measured optimum here: 2500;\n"
+        "                                needs elevation, same as --power-limit)\n"
         "  --fan <percent>               fixed fan speed (0 = restore automatic)\n"
         "  --report <seconds>            dashboard interval (default 5)\n"
         "  --api-port <port>             HTTP monitoring API on 127.0.0.1 (default 4068, 0 = off)\n"
         "  --api-bind-all                expose the API on all interfaces (not just loopback)\n"
         "  --bench-seconds <s>           run the solver without a pool for s seconds\n"
         "  --bench-pre-pow <file>        file holding a captured pre_pow for --bench-seconds\n"
+        "  --tune <s>                    sweep GPU profiles (power limit, clock locks), measure\n"
+        "                                GPS and GPS/W for each, then restore defaults\n"
         "  --config <file>               read key=value settings from a file\n"
         "  --help\n");
 }
@@ -171,11 +178,13 @@ void apply_setting(Config& c, const std::string& key, const std::string& value) 
     else if (key == "power-limit") { c.apply_power_limit = true; c.power_limit_w = (uint32_t)num(); }
     else if (key == "undervolt-core") { c.apply_undervolt = true; c.undervolt.core_clock_offset_mhz = (int)num(); }
     else if (key == "undervolt-voltage") { c.apply_undervolt = true; c.undervolt.voltage_offset_uv = (int)num(); }
+    else if (key == "lock-core") c.lock_core_mhz = (int)num();
     else if (key == "fan") c.fan_percent = (int)num();
     else if (key == "report") c.report_seconds = std::strtod(value.c_str(), nullptr);
     else if (key == "api-port") c.api_port = (uint16_t)num();
     else if (key == "api-bind-all") c.api_bind_all = (num() != 0);
     else if (key == "bench-seconds") c.bench_seconds = std::strtod(value.c_str(), nullptr);
+    else if (key == "tune-seconds") c.tune_seconds = std::strtod(value.c_str(), nullptr);
     else if (key == "bench-pre-pow") c.bench_pre_pow_file = value;
     else std::printf("warning: unknown config key '%s'\n", key.c_str());
 }
@@ -228,11 +237,13 @@ bool parse_args(Config& c, int argc, char** argv) {
         else if (a == "--power-limit") { c.apply_power_limit = true; c.power_limit_w = (uint32_t)std::strtoul(next("--power-limit"), nullptr, 10); }
         else if (a == "--undervolt-core") { c.apply_undervolt = true; c.undervolt.core_clock_offset_mhz = std::atoi(next("--undervolt-core")); }
         else if (a == "--undervolt-voltage") { c.apply_undervolt = true; c.undervolt.voltage_offset_uv = std::atoi(next("--undervolt-voltage")); }
+        else if (a == "--lock-core") c.lock_core_mhz = std::atoi(next("--lock-core"));
         else if (a == "--fan") c.fan_percent = std::atoi(next("--fan"));
         else if (a == "--report") c.report_seconds = std::strtod(next("--report"), nullptr);
         else if (a == "--api-port") c.api_port = (uint16_t)std::strtoul(next("--api-port"), nullptr, 10);
         else if (a == "--api-bind-all") c.api_bind_all = true;
         else if (a == "--bench-seconds") c.bench_seconds = std::strtod(next("--bench-seconds"), nullptr);
+        else if (a == "--tune") c.tune_seconds = std::strtod(next("--tune"), nullptr);
         else if (a == "--bench-pre-pow") c.bench_pre_pow_file = next("--bench-pre-pow");
         else { std::printf("unknown option: %s (try --help)\n", a.c_str()); return false; }
     }
@@ -282,6 +293,48 @@ void log_line(const std::string& s) {
     std::fflush(stdout);
 }
 
+// Pull a 238-byte pre_pow out of a captured stratum line or a bare hex string.
+// Shared by --bench-seconds and --tune.
+bool load_pre_pow_file(const std::string& path, std::vector<uint8_t>& pre, std::string& error) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) { error = "cannot open " + path; return false; }
+    std::string text;
+    char buf[4096];
+    size_t n;
+    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
+    std::fclose(f);
+
+    const std::string key = "\"pre_pow\":";
+    size_t at = text.find(key);
+    std::string hex;
+    if (at != std::string::npos) {
+        at += key.size();
+        while (at < text.size() && (text[at] == ' ' || text[at] == '"')) ++at;
+        size_t end = at;
+        while (end < text.size() && std::isxdigit((unsigned char)text[end])) ++end;
+        hex = text.substr(at, end - at);
+    } else {
+        for (char c : text) {
+            if (std::isxdigit((unsigned char)c)) hex.push_back(c);
+        }
+    }
+    if (hex.size() != GRIN_PRE_POW_SIZE * 2) {
+        error = "could not find a " + std::to_string(GRIN_PRE_POW_SIZE * 2) +
+                "-char pre_pow in " + path;
+        return false;
+    }
+    auto nib = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        return ch - 'A' + 10;
+    };
+    pre.resize(GRIN_PRE_POW_SIZE);
+    for (size_t i = 0; i < pre.size(); ++i) {
+        pre[i] = (uint8_t)((nib(hex[2 * i]) << 4) | nib(hex[2 * i + 1]));
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -299,7 +352,7 @@ int main(int argc, char** argv) {
     // else's address; if such a file is run, the mining silently pays a stranger.
     // With --allow-address the miner refuses to start unless the address it is
     // about to mine to is exactly the one the operator intends.
-    if (cfg.bench_seconds <= 0.0) {
+    if (cfg.bench_seconds <= 0.0 && cfg.tune_seconds <= 0.0) {
         if (cfg.user.empty()) {
             std::printf("--user <wallet.worker> is required (or --bench-seconds for a dry run)\n");
             return 2;
@@ -397,6 +450,18 @@ int main(int argc, char** argv) {
                         cfg.undervolt.core_clock_offset_mhz, cfg.undervolt.voltage_offset_uv,
                         r.ok ? "ok" : "FAILED", r.detail.empty() ? "" : (" (" + r.detail + ")").c_str());
         }
+        if (cfg.lock_core_mhz > 0) {
+            // Measured optimum on this card: hashrate is flat between 2500 and
+            // 2800 MHz while power is not, so locking at 2500 gives the same GPS at
+            // the best GPS/W. Requires elevation, like --power-limit.
+            grin::UndervoltPlan plan;
+            plan.lock_core_clock = true;
+            plan.core_clock_min_mhz = (uint32_t)cfg.lock_core_mhz;
+            plan.core_clock_max_mhz = (uint32_t)cfg.lock_core_mhz;
+            const auto r = grin::GpuControl::set_undervolt(plan);
+            std::printf("core clock lock %d MHz: %s%s\n", cfg.lock_core_mhz, r.ok ? "ok" : "FAILED",
+                        r.detail.empty() ? "" : (" (" + r.detail + ")").c_str());
+        }
         if (cfg.fan_percent >= 0) {
             const auto r = grin::GpuControl::set_fan_percent((uint32_t)cfg.fan_percent);
             std::printf("fan %d%%: %s%s\n", cfg.fan_percent, r.ok ? "ok" : "FAILED",
@@ -424,39 +489,11 @@ int main(int argc, char** argv) {
             std::printf("--bench-seconds requires --bench-pre-pow <file with a captured job>\n");
             return 2;
         }
-        FILE* f = std::fopen(cfg.bench_pre_pow_file.c_str(), "rb");
-        if (!f) { std::printf("cannot open %s\n", cfg.bench_pre_pow_file.c_str()); return 2; }
-        std::string text;
-        char buf[4096];
-        size_t n;
-        while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
-        std::fclose(f);
-
-        const std::string key = "\"pre_pow\":";
-        size_t at = text.find(key);
-        std::string hex;
-        if (at != std::string::npos) {
-            at += key.size();
-            while (at < text.size() && (text[at] == ' ' || text[at] == '"')) ++at;
-            size_t end = at;
-            while (end < text.size() && std::isxdigit((unsigned char)text[end])) ++end;
-            hex = text.substr(at, end - at);
-        } else {
-            for (char c : text) if (std::isxdigit((unsigned char)c)) hex.push_back(c);
-        }
-        if (hex.size() != GRIN_PRE_POW_SIZE * 2) {
-            std::printf("could not find a %zu-char pre_pow in %s\n", GRIN_PRE_POW_SIZE * 2,
-                        cfg.bench_pre_pow_file.c_str());
+        std::vector<uint8_t> pre;
+        std::string loadError;
+        if (!load_pre_pow_file(cfg.bench_pre_pow_file, pre, loadError)) {
+            std::printf("%s\n", loadError.c_str());
             return 2;
-        }
-        std::vector<uint8_t> pre(GRIN_PRE_POW_SIZE);
-        for (size_t i = 0; i < pre.size(); ++i) {
-            auto nib = [](char ch) -> int {
-                if (ch >= '0' && ch <= '9') return ch - '0';
-                if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-                return ch - 'A' + 10;
-            };
-            pre[i] = (uint8_t)((nib(hex[2 * i]) << 4) | nib(hex[2 * i + 1]));
         }
         if (!solver->set_pre_pow(pre.data(), pre.size(), error)) {
             std::printf("set_pre_pow failed: %s\n", error.c_str());
@@ -492,6 +529,123 @@ int main(int argc, char** argv) {
                     (unsigned long long)verified, last.trim_ms, last.find_cycles_ms,
                     (unsigned long long)last.edges_after_trim);
         if (grin::GpuControl::backend_name()[0] != 'n') grin::GpuControl::restore_defaults();
+        grin::Telemetry::shutdown();
+        return 0;
+    }
+
+    // ---- GPU tuning sweep -------------------------------------------------
+    // "Deliberate optimisation": apply one profile at a time, measure the real
+    // hashrate and power, print GPS and GPS/W, then restore defaults. Nothing is
+    // assumed, and every refusal is reported instead of being papered over.
+    //
+    // On this particular GPU the honest expected result is "no measurable
+    // difference": the card's MINIMUM power limit (100 W) is above this workload's
+    // draw (60-76 W), so the power slider cannot bite, and lean Cuckatoo32 is
+    // latency-bound rather than bandwidth-bound, so memory clocks do not matter.
+    // Measuring that is the point - it is why the real gains have to come from the
+    // kernels, not from card settings.
+    if (cfg.tune_seconds > 0.0) {
+        if (cfg.bench_pre_pow_file.empty()) {
+            std::printf("--tune requires --bench-pre-pow <file with a captured job>\n");
+            return 2;
+        }
+        std::vector<uint8_t> pre;
+        std::string loadError;
+        if (!load_pre_pow_file(cfg.bench_pre_pow_file, pre, loadError)) {
+            std::printf("%s\n", loadError.c_str());
+            return 2;
+        }
+        if (!solver->set_pre_pow(pre.data(), pre.size(), error)) {
+            std::printf("set_pre_pow failed: %s\n", error.c_str());
+            return 2;
+        }
+
+        struct Profile {
+            const char* name;
+            int power_w;
+            int core_lock_mhz;
+        };
+        const Profile profiles[] = {
+            {"stock (no limits)",  0,    0},
+            {"power limit 100 W",  100,  0},
+            {"power limit 120 W",  120,  0},
+            {"core lock 1500 MHz", 0,    1500},
+            {"core lock 2500 MHz", 0,    2500},
+            {"core lock 2800 MHz", 0,    2800},
+        };
+        const size_t profileCount = sizeof(profiles) / sizeof(profiles[0]);
+
+        std::printf("\nGPU tuning sweep: %.0f s per profile, %zu profiles\n",
+                    cfg.tune_seconds, profileCount);
+        std::printf("%-21s %-30s %9s %8s %10s\n", "profile", "applied", "GPS", "watts", "GPS/W");
+        for (size_t i = 0; i < profileCount; ++i) {
+            const Profile& p = profiles[i];
+
+            // stock restores defaults; the rest apply exactly one change
+            grin::ControlResult res{true, "defaults", false};
+            if (p.power_w > 0) {
+                res = grin::GpuControl::set_power_limit_watts((uint32_t)p.power_w);
+            } else if (p.core_lock_mhz > 0) {
+                grin::UndervoltPlan plan;
+                plan.lock_core_clock = true;
+                plan.core_clock_min_mhz = (uint32_t)p.core_lock_mhz;
+                plan.core_clock_max_mhz = (uint32_t)p.core_lock_mhz;
+                res = grin::GpuControl::set_undervolt(plan);
+            } else {
+                grin::GpuControl::restore_defaults();
+            }
+
+            std::string appliedText;
+            if (p.power_w == 0 && p.core_lock_mhz == 0) appliedText = "ok (defaults)";
+            else if (res.ok) appliedText = "ok";
+            else if (res.needs_elevation) appliedText = "NOT APPLIED (needs elevation)";
+            else appliedText = "NOT APPLIED";
+
+            if (!res.ok) {
+                std::printf("%-21s %-30s %9s %8s %10s  %s\n", p.name, appliedText.c_str(), "-", "-",
+                            "-", res.detail.substr(0, 70).c_str());
+                continue;
+            }
+
+            const auto t0 = Clock::now();
+            uint64_t attempts = 0;
+            uint64_t nonce = 0;
+            double watts = 0.0;
+            double peakTemp = 0.0;
+            int samples = 0;
+            // solve() blocks for ~18 s, so polling once per completed graph gives too
+            // few samples for an honest average. Sample immediately before and after
+            // each graph instead, and report how many samples the average is based on.
+            auto samplePower = [&]() {
+                grin::GpuTelemetry t;
+                std::string terr;
+                if (grin::Telemetry::read((unsigned)cfg.device, t, terr)) {
+                    watts += t.power_w;
+                    peakTemp = std::max(peakTemp, t.temperature_c);
+                    ++samples;
+                }
+            };
+            while (seconds_since(t0) < cfg.tune_seconds && !g_stop.load()) {
+                samplePower();
+                grin::FoundSolution out[8];
+                int nfound = 0;
+                std::string err;
+                const auto st = solver->solve(nonce++, out, 8, nfound, err);
+                samplePower();
+                if (st != grin::SolveStatus::Ok) continue;
+                ++attempts;
+            }
+            const double secs = seconds_since(t0);
+            const double gps = secs > 0.0 ? (double)attempts / secs : 0.0;
+            const double avgW = samples ? watts / samples : 0.0;
+            std::printf("%-21s %-30s %9.4f %8.1f %10.5f   n=%d %2.0fC\n", p.name,
+                        appliedText.c_str(), gps, avgW, avgW > 0.0 ? gps / avgW : 0.0, samples,
+                        peakTemp);
+            std::fflush(stdout);
+        }
+
+        grin::GpuControl::restore_defaults();
+        std::printf("all profiles restored to defaults\n");
         grin::Telemetry::shutdown();
         return 0;
     }
