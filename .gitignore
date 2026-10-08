@@ -1,0 +1,35 @@
+# Build outputs
+build/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.dll
+*.log
+
+# CMake / IDE
+cmake-build-*/
+.vs/
+out/
+CMakeCache.txt
+CMakeFiles/
+
+# Local tooling artifacts
+*.exe.sig
+uac-test.txt
+vs_install_rc.txt
+
+# Reference-only checkout: used to reverse-engineer the pool protocol, never
+# linked or copied. Reproducible with:
+#   git clone --depth 1 https://github.com/client8568/High-Resource-Cuckatoo-Miner.git
+third_party/hires-cuckatoo/
+
+# Upstream solver sources are vendored and committed (see docs/third-party.md),
+# but their git metadata must not become a nested repository.
+third_party/tromp-cuckoo/.git/
+
+# Python
+__pycache__/
+*.pyc

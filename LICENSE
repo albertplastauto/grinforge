@@ -1,0 +1,52 @@
+MIT License
+
+Copyright (c) 2026 GrinForge contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
+EXCEPTIONS — files that are NOT under the MIT license above
+================================================================================
+
+The Cuckatoo32 solver in this project is a derivative work of tromp/cuckoo,
+which is distributed under "The FAIR MINING License" (Copyright (c) 2013-2020
+John Tromp). The following files therefore remain under The FAIR MINING License
+and are NOT covered by the MIT grant above:
+
+    src/solver/lean_solver.cu      (port of src/cuckatoo/lean.cu)
+    src/solver/grin_params.hpp     (derived from cuckatoo.h / siphash.hpp)
+    src/solver/grin_verify.hpp     (derived from cuckatoo.h)
+
+and everything under:
+
+    third_party/tromp-cuckoo/      (unmodified upstream checkout)
+
+The full text of The FAIR MINING License is in
+third_party/tromp-cuckoo/LICENSE.txt and MUST be redistributed with any binary
+built from this project.
+
+GrinForge charges NO developer fee. The FAIR MINING condition (share half of
+any developer fee revenue with the coin developers) applies only to derived
+miners that charge such a fee; with a zero fee the condition is not triggered.
+
+BLAKE2b reference code under third_party/tromp-cuckoo/src/crypto/blake2* is
+licensed CC0 1.0 / OpenSSL / Apache-2.0 at your option (Copyright 2012 Samuel
+Neves), which is MIT-compatible.
+
+See docs/third-party.md for the complete attribution record.
