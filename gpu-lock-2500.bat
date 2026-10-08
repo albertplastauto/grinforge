@@ -21,7 +21,10 @@ rem
 rem Undo: gpu-unlock.bat, or  nvidia-smi --reset-gpu-clocks
 setlocal
 echo === GPU core clock cap 2500 MHz  %DATE% %TIME% ===
-nvidia-smi --lock-gpu-clocks=0,2500
+rem 300 is the card's documented minimum, not 0: GpuControl validates against the real
+rem envelope 300..3200 MHz and refuses anything outside it, so the miner's own
+rem --install-gpu-profile uses 300 too. Both let the card idle-downclock.
+nvidia-smi --lock-gpu-clocks=300,2500
 if errorlevel 1 (
   echo.
   echo FAILED. Most likely this window is not elevated: right-click the .bat and

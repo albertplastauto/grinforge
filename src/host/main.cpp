@@ -86,6 +86,7 @@ struct Config {
     bool     apply_undervolt = false;
     grin::UndervoltPlan undervolt;
     int      lock_core_mhz = 0;             // >0 = lock the core clock (needs elevation)
+    int      install_gpu_profile_mhz = 0;   // >0 = one-shot setup: apply the cap and exit
     int      fan_percent = -1;              // -1 = leave alone
 
     double   bench_seconds = 0.0;           // >0 = run without a pool, for measurement
@@ -140,6 +141,8 @@ void usage() {
         "  --undervolt-voltage <uv>      voltage offset in microvolts (e.g. -50000)\n"
         "  --lock-core <mhz>             lock the core clock (measured optimum here: 2500;\n"
         "                                needs elevation, same as --power-limit)\n"
+        "  --install-gpu-profile <mhz>   one-shot setup, no mining: cap the core clock and\n"
+        "                                print how to keep it across reboots (needs elevation)\n"
         "  --fan <percent>               fixed fan speed (0 = restore automatic)\n"
         "  --report <seconds>            dashboard interval (default 5)\n"
         "  --api-port <port>             HTTP monitoring API on 127.0.0.1 (default 4068, 0 = off)\n"
@@ -179,6 +182,7 @@ void apply_setting(Config& c, const std::string& key, const std::string& value) 
     else if (key == "undervolt-core") { c.apply_undervolt = true; c.undervolt.core_clock_offset_mhz = (int)num(); }
     else if (key == "undervolt-voltage") { c.apply_undervolt = true; c.undervolt.voltage_offset_uv = (int)num(); }
     else if (key == "lock-core") c.lock_core_mhz = (int)num();
+    else if (key == "install-gpu-profile") c.install_gpu_profile_mhz = (int)num();
     else if (key == "fan") c.fan_percent = (int)num();
     else if (key == "report") c.report_seconds = std::strtod(value.c_str(), nullptr);
     else if (key == "api-port") c.api_port = (uint16_t)num();
@@ -238,6 +242,7 @@ bool parse_args(Config& c, int argc, char** argv) {
         else if (a == "--undervolt-core") { c.apply_undervolt = true; c.undervolt.core_clock_offset_mhz = std::atoi(next("--undervolt-core")); }
         else if (a == "--undervolt-voltage") { c.apply_undervolt = true; c.undervolt.voltage_offset_uv = std::atoi(next("--undervolt-voltage")); }
         else if (a == "--lock-core") c.lock_core_mhz = std::atoi(next("--lock-core"));
+        else if (a == "--install-gpu-profile") c.install_gpu_profile_mhz = std::atoi(next("--install-gpu-profile"));
         else if (a == "--fan") c.fan_percent = std::atoi(next("--fan"));
         else if (a == "--report") c.report_seconds = std::strtod(next("--report"), nullptr);
         else if (a == "--api-port") c.api_port = (uint16_t)std::strtoul(next("--api-port"), nullptr, 10);
@@ -352,7 +357,9 @@ int main(int argc, char** argv) {
     // else's address; if such a file is run, the mining silently pays a stranger.
     // With --allow-address the miner refuses to start unless the address it is
     // about to mine to is exactly the one the operator intends.
-    if (cfg.bench_seconds <= 0.0 && cfg.tune_seconds <= 0.0) {
+    // Modes that never talk to a pool do not need a wallet: a dry benchmark, the
+    // GPU tuning sweep, and the one-shot GPU profile installer.
+    if (cfg.bench_seconds <= 0.0 && cfg.tune_seconds <= 0.0 && cfg.install_gpu_profile_mhz <= 0) {
         if (cfg.user.empty()) {
             std::printf("--user <wallet.worker> is required (or --bench-seconds for a dry run)\n");
             return 2;
@@ -469,6 +476,43 @@ int main(int argc, char** argv) {
         }
     } else {
         std::printf("gpu control unavailable: %s\n", error.c_str());
+    }
+
+    // ---- one-shot GPU profile setup --------------------------------------
+    // Deliberately a separate mode that applies the cap and EXITS: changing clocks
+    // needs administrator rights, and we do not want the mining process itself to
+    // hold them. So the operator runs this once per machine, elevated, and then
+    // mines unprivileged as usual.
+    if (cfg.install_gpu_profile_mhz > 0) {
+        std::printf("\ninstalling GPU profile: core clock cap %d MHz\n", cfg.install_gpu_profile_mhz);
+        grin::UndervoltPlan plan;
+        plan.lock_core_clock = true;
+        // 0 would mean "no lower bound" to nvidia-smi, but GpuControl deliberately
+        // validates against the card's real envelope (300..3200 MHz here) and refuses
+        // anything outside it, so use the hardware minimum instead of 0. The card then
+        // still downclocks when idle, which is the whole point of capping rather than
+        // pinning.
+        plan.core_clock_min_mhz = 300;
+        plan.core_clock_max_mhz = (uint32_t)cfg.install_gpu_profile_mhz;
+        const auto r = grin::GpuControl::set_undervolt(plan);
+        if (!r.ok) {
+            std::printf("FAILED to apply the cap: %s\n%s\n", r.detail.c_str(),
+                        r.needs_elevation
+                            ? "Re-run this command from an elevated console (Run as administrator / accept the UAC prompt)."
+                            : "");
+            grin::Telemetry::shutdown();
+            return 2;
+        }
+        std::printf("applied: %s\n", r.detail.c_str());
+        std::printf(
+            "\nThe driver forgets this on reboot. To keep it, run either\n"
+            "  * install-gpu-clock-task.bat   (creates a logon task, needs elevation), or\n"
+            "  * gpu-lock-2500.bat yourself at every logon.\n"
+            "Undo with gpu-unlock.bat (or nvidia-smi --reset-gpu-clocks).\n"
+            "Note: this is an efficiency setting, not a speed setting - measured hashrate\n"
+            "is the same with and without it (see docs/performance-notes.md, section 7).\n");
+        grin::Telemetry::shutdown();
+        return 0;
     }
 
     // ---- solver -----------------------------------------------------------
@@ -910,6 +954,7 @@ int main(int argc, char** argv) {
 
     // ---- watchdog and dashboard -----------------------------------------
     auto lastReport = Clock::now();
+    bool clockAdviceGiven = false;
     uint64_t lastAttempts = 0;
     while (!g_stop.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -953,6 +998,25 @@ int main(int argc, char** argv) {
                 }
                 old->stop();                 // joins the old IO thread outside the lock
                 get_client()->start();
+            }
+        }
+
+        // One-time advisory: nvidia-smi cannot report whether a clock cap is active
+        // (Max Clocks always shows the hardware maximum), so judge it from the clock
+        // actually observed while the GPU is loaded. Never blocks anything.
+        if (!clockAdviceGiven && telemetryOk && seconds_since(processStart) > 90.0 &&
+            t.utilization_gpu_percent > 50.0) {
+            clockAdviceGiven = true;
+            if (t.core_clock_mhz > 2600.0) {
+                log_line("core clock is running at ~" + std::to_string((int)t.core_clock_mhz) +
+                         " MHz. Measured on this GPU the hashrate is identical at ~2500 MHz "
+                         "with ~12% better GPS/W. To cap it (one time, needs elevation): "
+                         "grinforge.exe --install-gpu-profile 2500, then "
+                         "install-gpu-clock-task.bat to keep it across reboots.");
+            } else {
+                log_line("core clock is running at ~" + std::to_string((int)t.core_clock_mhz) +
+                         " MHz, which is at or below the measured optimum - the efficiency "
+                         "profile appears to be active.");
             }
         }
 
