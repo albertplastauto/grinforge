@@ -221,7 +221,9 @@ struct Shared {
     bool has_job = false;
     uint64_t job_generation = 0;
 
-    std::atomic<uint64_t> attempts{0};
+    std::atomic<uint64_t> attempts{0};        // graph attempts that COMPLETED
+    std::atomic<uint64_t> graphs_overloaded{0};
+    std::atomic<uint64_t> graphs_failed{0};
     std::atomic<uint64_t> solutions{0};
     std::atomic<uint64_t> submitted{0};
     std::atomic<uint64_t> accepted{0};
@@ -241,8 +243,11 @@ int main(int argc, char** argv) {
     SetConsoleCtrlHandler(console_handler, TRUE);
 
     Config cfg;
-    cfg.pools.push_back(PoolSpec{});   // default pool
     if (!parse_args(cfg, argc, argv)) return 2;
+    // Only fall back to the built-in pool when the operator supplied none.
+    // (Adding it unconditionally produced a two-entry list containing the same
+    // pool twice, which made failover rotate onto the pool that just failed.)
+    if (cfg.pools.empty()) cfg.pools.push_back(PoolSpec{});
 
     std::printf("GrinForge - GRIN Cuckatoo32 miner (0%% dev fee)\n");
     std::printf("================================================\n");
@@ -484,6 +489,8 @@ int main(int argc, char** argv) {
                 j += ",\"speed\":" + std::to_string(gps);
                 j += ",\"speed_unit\":\"GPS\"";
                 j += ",\"attempts\":" + std::to_string((unsigned long long)attempts);
+                j += ",\"graphs_overloaded\":" + std::to_string((unsigned long long)shared.graphs_overloaded.load());
+                j += ",\"graphs_failed\":" + std::to_string((unsigned long long)shared.graphs_failed.load());
                 j += ",\"solutions\":" + std::to_string((unsigned long long)shared.solutions.load());
                 j += ",\"total_submitted_shares\":" + std::to_string((unsigned long long)shared.submitted.load());
                 j += ",\"total_accepted_shares\":" + std::to_string((unsigned long long)s.accepted);
@@ -523,6 +530,7 @@ int main(int argc, char** argv) {
         uint64_t nonce = 0;
         uint64_t localGeneration = 0;
         double   lastSolveSeconds = 0.0;
+        bool     jobSeen = false;
         while (!g_stop.load()) {
             grin::Job job;
             bool have = false;
@@ -541,10 +549,19 @@ int main(int argc, char** argv) {
                     log_line("bad job pre_pow: " + err);
                 } else {
                     nonce = 0;
+                    jobSeen = true;
                     log_line("new job height=" + std::to_string(job.height) +
                              " job_id=" + std::to_string(job.job_id) +
                              " difficulty=" + std::to_string(job.difficulty));
                 }
+            }
+            if (!jobSeen) {
+                // Nothing to mine yet. Spinning here called solve() on an
+                // unconfigured solver thousands of times per second, which showed
+                // up as 16168 bogus "failed graphs" in the first second and could
+                // not be distinguished from real CUDA failures.
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                continue;
             }
 
             grin::FoundSolution out[8];
@@ -553,8 +570,26 @@ int main(int argc, char** argv) {
             const auto t0 = Clock::now();
             const auto st = solver->solve(nonce, out, 8, nfound, err);
             lastSolveSeconds = seconds_since(t0);
-            shared.attempts.fetch_add(1);
-            shared.last_progress_unix_ms.store(now_unix_ms());
+
+            // Only a graph that actually completed counts towards the hashrate.
+            // Counting failed attempts produced a reported "6440 GPS" while the
+            // GPU sat at 0% utilisation, because every solve() returned instantly
+            // with Overloaded. Progress is likewise only recorded on success, so
+            // the stall watchdog can still fire when nothing completes.
+            if (st == grin::SolveStatus::Ok) {
+                shared.attempts.fetch_add(1);
+                shared.last_progress_unix_ms.store(now_unix_ms());
+            } else if (st == grin::SolveStatus::Overloaded) {
+                const uint64_t n = shared.graphs_overloaded.fetch_add(1) + 1;
+                if (n == 1 || n % 200 == 0) {
+                    log_line("graph overloaded " + std::to_string(n) +
+                             " time(s): too many edges survived trimming - raise --ntrims");
+                }
+            } else if (st == grin::SolveStatus::Aborted) {
+                // asked to stop by the watchdog; not a failure
+            } else {
+                shared.graphs_failed.fetch_add(1);
+            }
 
             if (st == grin::SolveStatus::CudaError) {
                 log_line("CUDA error: " + err + " - restarting solver");
@@ -665,12 +700,14 @@ int main(int argc, char** argv) {
             lastAttempts = attempts;
             const auto s = get_client()->stats();
 
-            std::printf("[%-8s] %6.3f GPS | attempts %-7llu sol %-4llu sub %-4llu "
-                        "acc %-4llu rej %-4llu | ",
+            std::printf("[%-8s] %6.3f GPS | graphs %-7llu sol %-4llu sub %-4llu "
+                        "acc %-4llu rej %-4llu ovl %-6llu fail %-4llu | ",
                         gps > 0 ? "mining" : "idle", gps, (unsigned long long)attempts,
                         (unsigned long long)shared.solutions.load(),
                         (unsigned long long)shared.submitted.load(),
-                        (unsigned long long)s.accepted, (unsigned long long)s.rejected);
+                        (unsigned long long)s.accepted, (unsigned long long)s.rejected,
+                        (unsigned long long)shared.graphs_overloaded.load(),
+                        (unsigned long long)shared.graphs_failed.load());
             if (telemetryOk) {
                 std::printf("%2.0f C %5.1f/%.0f W VRAM %4llu MiB fan %3.0f%%\n",
                             t.temperature_c, t.power_w, t.power_limit_w,
