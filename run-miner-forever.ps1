@@ -20,11 +20,28 @@
 #
 # Started detached by run-miner-forever.bat. Stop it with stop-miner.bat.
 
+param(
+    [string]$Wallet = ''
+)
+
 $ErrorActionPreference = 'Continue'
 
 $exe    = 'E:\grin-miner\build\cmake\grinforge.exe'
-$wallet = 'grin1replacewithyourownaddressreplacewithyourownaddressreplacewithyourow'
 $logDir = 'E:\grin-miner\logs'
+
+# The wallet address is read from wallet.txt (gitignored) rather than hardcoded, so a
+# real address never lands in the public repository. Override with -Wallet for a second
+# machine, or point wallet.txt at a different address.
+if (-not $Wallet) {
+    $walletFile = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'wallet.txt'
+    if (-not (Test-Path $walletFile)) {
+        Write-Host "error: $walletFile not found"
+        Write-Host "       copy wallet.txt.example to wallet.txt and put your Grin address in it"
+        exit 2
+    }
+    $Wallet = (Get-Content $walletFile -TotalCount 1).Trim()
+}
+$wallet = $Wallet
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 Set-Content -Path (Join-Path $logDir 'supervisor.pid') -Value $PID

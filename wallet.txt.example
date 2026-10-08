@@ -1,0 +1,11 @@
+# Copy this file to wallet.txt and put YOUR Grin wallet address in it.
+#
+# wallet.txt is gitignored on purpose: a public repository should not tie the
+# maintainer's identity to a wallet that receives mining income.
+#
+# Format: a single line with the address, optionally with a worker name:
+#   grin1yourwalletaddressyoursyoursyoursyoursyoursyoursyoursyoursyours.RIG1
+#
+# Use it with the wallet guard so a tampered script cannot redirect your hashrate:
+#   grinforge.exe --pool grin.2miners.com:3030 --user <wallet>.RIG1 --allow-address <wallet>
+grin1replacewithyourownaddressreplacewithyourownaddressreplacewithyourow

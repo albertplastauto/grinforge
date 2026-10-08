@@ -12,6 +12,9 @@ build/
 # Long-run miner logs (created by run-miner-forever.ps1)
 logs/
 
+# Your wallet address: keep it out of a public repository (see wallet.txt.example)
+wallet.txt
+
 # CMake / IDE
 cmake-build-*/
 .vs/

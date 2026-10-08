@@ -12,13 +12,24 @@ No shares are submitted.
 Usage: python stratum_probe.py [host:port] [seconds]
 """
 import json
+import os
 import socket
 import sys
 import time
 
 HOSTPORT = sys.argv[1] if len(sys.argv) > 1 else "grin.2miners.com:3030"
 SECONDS = float(sys.argv[2]) if len(sys.argv) > 2 else 25.0
-USER = "grin1replacewithyourownaddressreplacewithyourownaddressreplacewithyourow.PROBE"
+# Third argument: the pool login. Read from wallet.txt when present, so a real address
+# never has to live in the public repository (see wallet.txt.example).
+if len(sys.argv) > 3:
+    USER = sys.argv[3]
+else:
+    _wallet_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "wallet.txt")
+    if os.path.exists(_wallet_file):
+        with open(_wallet_file, "r", encoding="utf-8") as _handle:
+            USER = _handle.read().strip().splitlines()[0].strip() + ".PROBE"
+    else:
+        USER = "grin1replacewithyourownaddressreplacewithyourownaddressreplacewithyourow.PROBE"
 
 host, _, port = HOSTPORT.partition(":")
 port = int(port or 3030)
