@@ -63,8 +63,12 @@ namespace {
 
 #define MAXEDGES (NEDGES >> IDXSHIFT)
 
+// CH-7 (see the helper section below): the leaf test needs a degree >= 2 counter,
+// which costs two bits per node.
+const u64 kNodeBits = 2;
+
 const u64 kEdgeBytes = NEDGES / 8;                       // 512 MiB at C32
-const u64 kNodeBytes = (NEDGES >> PART_BITS) / 8;        // 512 MiB at PART_BITS=0
+const u64 kNodeBytes = ((NEDGES >> PART_BITS) * kNodeBits) / 8;   // 1 GiB at PART_BITS=0
 const u32 kPartMask = (1u << PART_BITS) - 1u;
 const u32 kNonPartBits = EDGEBITS - PART_BITS;
 
@@ -87,15 +91,33 @@ __device__ __forceinline__ void alive_kill(u32* alive, u64 nonce) {
     alive[nonce >> 5] |= (1u << (nonce & 31));
 }
 
-__device__ __forceinline__ void nonleaf_set(u32* nonleaf, word_t n) {
-    atomicOr(&nonleaf[n >> 5], 1u << (n & 31));
+// CH-7 (bug fix): the "nonleaf" bitmap must answer "does this node have at least
+// TWO alive edges?", because edge trimming removes edges whose endpoint is a leaf
+// (degree 1). Upstream `src/cuckatoo/lean.cu` instead uses a SINGLE bit per node
+// and tests `nonleaf.test((u & NONPART_MASK) ^ 1)`:
+//   * a single bit can only express "degree >= 1", so it cannot detect a leaf;
+//   * `^ 1` tests a DIFFERENT (effectively random) node than the one that was set,
+//     which turns the kill into an unbiased ~37% random edge deletion each round.
+// Random deletion destroys long cycles, which is exactly what we measured:
+// 0 solutions in 24 C32 graphs and 0 in 40 C29 graphs, while short cycles
+// (2, 22) still appeared.
+//
+// The fix is the structure Tromp himself uses in the working `src/cuckoo/lean.cu`
+// (`twice_set`): two bits per node, bit 0 = "has an alive edge", bit 1 = "has at
+// least two". `nonleaf_set2` is `twice_set::set` and `nonleaf_deg2` is
+// `twice_set::test`, so the leaf test becomes `!nonleaf_deg2(u)`, with no `^ 1`.
+// Cost: 2 bits per node == 1 GiB at C32 instead of 512 MiB.
+__device__ __forceinline__ void nonleaf_set2(u32* nonleaf, word_t u) {
+    const word_t idx = u >> 4;                  // 16 nodes per 32-bit word
+    const u32 bit = 1u << (2 * (u & 15));
+    const u32 old = atomicOr(&nonleaf[idx], bit);
+    const u32 bit2 = bit << 1;
+    if ((old & (bit2 | bit)) == bit) atomicOr(&nonleaf[idx], bit2);
 }
-__device__ __forceinline__ bool nonleaf_test(const u32* nonleaf, word_t n) {
-    return ((nonleaf[n >> 5] >> (n & 31)) & 1u) != 0;
+__device__ __forceinline__ bool nonleaf_deg2(const u32* nonleaf, word_t u) {
+    return ((nonleaf[u >> 4] >> (2 * (u & 15))) & 2u) != 0;
 }
 
-// CH-2: explicit shift-count handling. PTX clamps shifts >= width to width, which
-// is what upstream silently relies on; this makes it defined behaviour.
 __device__ __forceinline__ bool safe_shift32(u32& v, u32 ffs) {
     if (ffs >= 32) { v = 0; return true; }
     v >>= ffs;
@@ -119,7 +141,7 @@ __global__ void count_node_deg(siphash_keys sipkeys, const u32* alive, u32* nonl
             safe_shift32(alive32, ffs);
             const word_t u = (word_t)dipnode(sipkeys, nonce, uorv);
             if (in_partition(u, part)) {
-                nonleaf_set(nonleaf, (word_t)(u & kNonPartMask));
+                nonleaf_set2(nonleaf, (word_t)(u & kNonPartMask));
             }
         }
     }
@@ -137,7 +159,7 @@ __global__ void kill_leaf_edges(siphash_keys sipkeys, u32* alive, const u32* non
             nonce += ffs;
             safe_shift32(alive32, ffs);
             const word_t u = (word_t)dipnode(sipkeys, nonce, uorv);
-            if (in_partition(u, part) && !nonleaf_test(nonleaf, (word_t)((u & kNonPartMask) ^ 1))) {
+            if (in_partition(u, part) && !nonleaf_deg2(nonleaf, (word_t)(u & kNonPartMask))) {
                 alive_kill(alive, nonce);
             }
         }

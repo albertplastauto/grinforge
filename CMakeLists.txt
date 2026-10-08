@@ -79,6 +79,28 @@ add_executable(solver_bench tools/solver_bench.cpp)
 target_link_libraries(solver_bench PRIVATE grin_solver grin_warnings)
 set_target_properties(solver_bench PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
 
+# ---------------------------------------------------------------------------
+# Diagnostic build: the identical solver at EDGEBITS=29.
+#
+# Cuckoo Cycle at 2^32 edges produces solutions rarely, so "found nothing" over
+# a handful of nonces cannot distinguish a bug from statistics. At 2^29 the same
+# code path (header -> BLAKE2b -> siphash keys -> trimming -> cycle search ->
+# verify) runs ~8x faster and yields solutions often enough to validate the whole
+# pipeline in seconds. This binary is a test instrument, not a miner.
+# ---------------------------------------------------------------------------
+add_library(grin_solver29 STATIC src/solver/lean_solver.cu)
+target_compile_definitions(grin_solver29 PRIVATE EDGEBITS=29)
+target_include_directories(grin_solver29 PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/solver"
+  "${CUCKATOO_INC}"
+  "${CRYPTO_INC}"
+)
+target_link_libraries(grin_solver29 PUBLIC grin_blake2b PRIVATE grin_warnings)
+
+add_executable(solver_bench29 tools/solver_bench.cpp)
+target_link_libraries(solver_bench29 PRIVATE grin_solver29 grin_warnings)
+set_target_properties(solver_bench29 PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/stratum_client_test.cpp")
   add_executable(stratum_client_test
     tools/stratum_client_test.cpp
