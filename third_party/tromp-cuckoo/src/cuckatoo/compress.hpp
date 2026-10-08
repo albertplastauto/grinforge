@@ -1,5 +1,11 @@
 #include <new>
 
+// LOCAL PATCH (GrinForge, documented in docs/third-party.md):
+//   `sizeof(word_t[SIZE])` uses SIZE as a runtime array bound, which is a GCC/Clang
+//   variable-length-array extension. MSVC rejects it ("expression must have a
+//   constant value"), so it is written as SIZE * sizeof(word_t). Semantically
+//   identical on every compiler.
+
 // compressor for cuckatoo nodes where edgetrimming
 // has left at most 2^-compressbits nodes in each partition
 template <typename word_t>
@@ -49,11 +55,11 @@ public:
   }
 
   uint64_t bytes() {
-    return sizeof(word_t[SIZE]);
+    return sizeof(word_t) * SIZE;
   }
 
   void reset() {
-    memset(nodes, (char)NIL, sizeof(word_t[SIZE]));
+    memset(nodes, (char)NIL, sizeof(word_t) * SIZE);
     npairs = 0;
   }
 

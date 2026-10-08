@@ -52,6 +52,19 @@ struct GpuTelemetry {
     bool        valid = false;
 };
 
+// Hardware temperature thresholds reported by the NVML backend
+// (nvmlDeviceGetTemperatureThreshold). Unsupported thresholds stay at -1; on the
+// target RTX 4060 Ti memory_max_c is -1 because NVML_TEMPERATURE_THRESHOLD_MEM_MAX
+// returns NVML_ERROR_NOT_SUPPORTED. `valid` is true when at least one threshold was
+// read successfully. These values are useful for a thermal watchdog in the miner.
+struct ThermalLimits {
+    double slowdown_c = -1.0;    // hardware slowdown temperature
+    double shutdown_c = -1.0;    // hardware shutdown temperature
+    double gpu_max_c = -1.0;     // GPU temperature at which clocks may drop below base
+    double memory_max_c = -1.0;  // memory temperature that triggers SW slowdown
+    bool   valid = false;
+};
+
 // ---------------------------------------------------------------------------
 // Throttle bitmask helpers.
 //
@@ -92,6 +105,10 @@ public:
     // when the backend is not initialised; individual unsupported fields are
     // reported as documented in GpuTelemetry instead of failing the whole call.
     static bool read(unsigned index, GpuTelemetry& out, std::string& error);
+
+    // Reads the hardware temperature thresholds. NVML backend only: the
+    // nvidia-smi fallback returns false with an explanatory error.
+    static bool read_thermal_limits(unsigned index, ThermalLimits& out, std::string& error);
 
     // "nvml", "nvidia-smi" or "none".
     static const char* backend_name();

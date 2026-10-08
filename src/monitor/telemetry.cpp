@@ -4,25 +4,24 @@
 // Design notes
 // ------------
 // * nvml.dll is loaded with LoadLibraryW() and every entry point is resolved with
-//   GetProcAddress(). Nothing is linked against nvml.lib, and the CUDA Toolkit is
-//   not needed at build or run time - only the NVIDIA display driver.
-// * The NVML ABI is declared locally instead of including nvml.h so that the module
+//   GetProcAddress(). Nothing is linked against nvml.lib and the CUDA Toolkit is not
+//   needed at build or run time - only the NVIDIA display driver.
+// * The NVML ABI is declared locally instead of including nvml.h so that this module
 //   has no dependency on the CUDA Toolkit include directory. Every struct/enum used
-//   here was verified against the public NVML header (go-nvml gen/nvml/nvml.h mirror
-//   of the shipped header) and exercised against the real nvml.dll on the target
-//   machine (RTX 4060 Ti, driver 617.14) with a ctypes harness before being written:
+//   here was verified against the public NVML header (the go-nvml generated mirror of
+//   the shipped header) and exercised against the real nvml.dll on the target machine
+//   (RTX 4060 Ti, driver 617.14) with a ctypes harness before being written:
 //     - nvmlMemory_v2_t is 40 bytes and its version field is 40 | (2 << 24);
 //     - nvmlFieldValue_t is 40 bytes; NVML_FI_DEV_MEMORY_TEMP == 82;
 //     - nvmlDeviceGetMemoryInfo_v2 reported 8585740288 B total (8188 MiB);
-//     - power management limit constraints reported 100000/160000 mW;
+//     - limit constraints reported 100000/160000 mW; the enforced limit 160000 mW;
 //     - NVML_TEMPERATURE_THRESHOLD_MEM_MAX and NVML_FI_DEV_MEMORY_TEMP returned
 //       NVML_ERROR_NOT_SUPPORTED (3) on this SKU -> memory temperature = -1.
-// * No exception ever escapes: every public entry point catches (...) and converts
-//   failures into (false, error).
-// * read() caches handles/names at init() time and performs no allocation-heavy work
-//   in the common path, so it is safe to poll from a tight loop. The nvidia-smi
-//   fallback costs one process spawn per sample, so it is additionally rate-limited
-//   to one spawn per kNvidiaSmiCacheTtlMs for the same device index.
+// * No exception ever escapes: every public entry point catches (...) and converts a
+//   failure into (false, error).
+// * read() caches handles/names at init() time, so it is safe to poll from a tight
+//   loop. The nvidia-smi fallback costs one process spawn per sample and is therefore
+//   additionally rate-limited to one spawn per kNvidiaSmiCacheTtlMs (same device).
 //
 #include "telemetry.hpp"
 
@@ -31,6 +30,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <mutex>
 #include <shared_mutex>
@@ -41,34 +41,32 @@ namespace grin {
 namespace {
 
 // ---------------------------------------------------------------------------
-// Minimal NVML ABI (see the file header for the verification provenance).
+// Minimal NVML ABI (see the file header for verification provenance).
 // ---------------------------------------------------------------------------
 using NvmlDevice = void*;
 using NvmlReturn = int;
 
 constexpr int kNvmlSuccess = 0;
-constexpr int kNvmlErrorNotSupported = 3;
 
-constexpr int kNvmlTemperatureGpu = 0;            // nvmlTemperatureSensors_t
-constexpr int kNvmlThresholdShutdown = 0;         // nvmlTemperatureThresholds_t
+constexpr int kNvmlTemperatureGpu = 0;      // nvmlTemperatureSensors_t: NVML_TEMPERATURE_GPU
+constexpr int kNvmlThresholdShutdown = 0;   // nvmlTemperatureThresholds_t
 constexpr int kNvmlThresholdSlowdown = 1;
 constexpr int kNvmlThresholdMemMax = 2;
 constexpr int kNvmlThresholdGpuMax = 3;
-constexpr int kNvmlClockGraphics = 0;             // nvmlClockType_t
+constexpr int kNvmlClockGraphics = 0;       // nvmlClockType_t
 constexpr int kNvmlClockSm = 1;
 constexpr int kNvmlClockMem = 2;
-// nvmlPcieUtilCounter_t: the sample is expressed in KB/s with 1 KB granularity.
+// nvmlPcieUtilCounter_t: the sample is in KB/s with 1 KB granularity.
 constexpr int kNvmlPcieUtilTxBytes = 0;
 constexpr int kNvmlPcieUtilRxBytes = 1;
 // nvmlFieldValue_t::fieldId for the memory-junction temperature (may be unsupported).
 constexpr int kNvmlFiDevMemoryTemp = 82;
 
-// Returned by nvmlDeviceGetFieldValues() per field; NVML_SUCCESS == 0.
-constexpr int kNvmlValueTypeDouble = 0;
+constexpr int kNvmlValueTypeDouble = 0;       // nvmlValueType_t
 constexpr int kNvmlValueTypeUnsignedInt = 1;
 
 struct NvmlMemoryV2 {
-    unsigned           version;   // must be nvmlStructVersionMemory2
+    unsigned           version;   // must be kNvmlMemoryV2Version
     unsigned long long total;     // bytes
     unsigned long long reserved;  // bytes
     unsigned long long free;      // bytes
@@ -126,7 +124,7 @@ struct NvmlApi {
     NvmlReturn(__cdecl* device_get_current_clocks_throttle_reasons)(NvmlDevice device, unsigned long long* reasons) = nullptr;
     NvmlReturn(__cdecl* device_get_pcie_throughput)(NvmlDevice device, int counter, unsigned* kb_per_s) = nullptr;
     NvmlReturn(__cdecl* device_get_field_values)(NvmlDevice device, int count, NvmlFieldValue* values) = nullptr;
-    const char* (__cdecl* error_string)(NvmlReturn result) = nullptr;
+    const char*(__cdecl* error_string)(NvmlReturn result) = nullptr;
 
     // True when the indispensable entry points were resolved.
     bool usable() const {
@@ -137,8 +135,8 @@ struct NvmlApi {
 
 enum class Backend { None, Nvml, NvidiaSmi };
 
-// Upper bound on the number of devices we handle; 64 is far beyond any mining rig
-// target for this module and keeps the cached vectors bounded.
+// Bounded number of devices (a mining rig target far beyond anything this module
+// needs) so the cached vectors stay small and predictable.
 constexpr unsigned kMaxDevices = 64;
 
 // Timeout for a single nvidia-smi invocation.
@@ -152,23 +150,22 @@ constexpr size_t kMaxCapturedBytes = 256 * 1024;
 constexpr uint64_t kNvidiaSmiCacheTtlMs = 200;
 
 // ---------------------------------------------------------------------------
-// Global (process-wide) state. This is the only mutable global state in the
-// module besides the resolved NVML function table; the telemetry specification
-// explicitly requires device handles to be cached after init().
+// Global (process-wide) state: the resolved NVML function table plus the cached
+// device handles/names that the specification requires after init().
 // ---------------------------------------------------------------------------
 struct TelemetryState {
     std::shared_mutex mutex;
 
-    bool      initialised = false;
-    bool      ready = false;
-    Backend   backend = Backend::None;
-    NvmlApi   nvml;
-    std::wstring smi_path;                  // resolved nvidia-smi.exe path
+    bool         initialised = false;
+    bool         ready = false;
+    Backend      backend = Backend::None;
+    NvmlApi      nvml;
+    std::wstring smi_path;             // resolved nvidia-smi.exe path
 
-    std::vector<NvmlDevice> handles;        // NVML backend
+    std::vector<NvmlDevice>  handles;  // NVML backend
     std::vector<std::string> names;
-    std::vector<double> cached_min_w;       // power-management limit constraints
-    std::vector<double> cached_max_w;
+    std::vector<double>      cached_min_w;  // power-management limit constraints
+    std::vector<double>      cached_max_w;
 
     // nvidia-smi backend cache (see kNvidiaSmiCacheTtlMs).
     uint64_t     smi_cache_stamp_ms = 0;
@@ -183,9 +180,7 @@ TelemetryState g_state;
 // ---------------------------------------------------------------------------
 
 std::string trim(std::string text) {
-    const auto not_space = [](unsigned char ch) {
-        return std::isspace(ch) == 0;
-    };
+    const auto not_space = [](unsigned char ch) { return std::isspace(ch) == 0; };
     text.erase(text.begin(), std::find_if(text.begin(), text.end(), not_space));
     text.erase(std::find_if(text.rbegin(), text.rend(), not_space).base(), text.end());
     return text;
@@ -227,6 +222,27 @@ bool parse_number(const std::string& token, double& out) {
     return true;
 }
 
+// ASCII-only widening used for command lines and error text (nvidia-smi arguments
+// are pure ASCII, and the system message is not part of the command line).
+std::wstring widen_ascii(const std::string& text) {
+    std::wstring wide;
+    wide.reserve(text.size());
+    for (char ch : text) {
+        wide.push_back(static_cast<wchar_t>(static_cast<unsigned char>(ch)));
+    }
+    return wide;
+}
+
+std::string narrow_ascii(const std::wstring& text) {
+    std::string narrow;
+    narrow.reserve(text.size());
+    for (wchar_t ch : text) {
+        const unsigned int code = static_cast<unsigned int>(ch);
+        narrow.push_back(code < 128u ? static_cast<char>(code) : '?');
+    }
+    return narrow;
+}
+
 std::string system_error_text(DWORD code) {
     LPWSTR buffer = nullptr;
     const DWORD length = FormatMessageW(
@@ -236,7 +252,7 @@ std::string system_error_text(DWORD code) {
     if (length != 0 && buffer != nullptr) {
         std::wstring wide(buffer, length);
         LocalFree(buffer);
-        while (!wide.empty() && (wide.back() == L'\r' || wide.back() == L'\n' || wide.back() == L' ')) {
+        while (wide.empty() == false && (wide.back() == L'\r' || wide.back() == L'\n' || wide.back() == L' ')) {
             wide.pop_back();
         }
         const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
@@ -245,7 +261,9 @@ std::string system_error_text(DWORD code) {
             std::string narrow(static_cast<size_t>(needed), '\0');
             WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
                                 narrow.data(), needed, nullptr, nullptr);
-            text += " (" + narrow + ")";
+            text += " (";
+            text += narrow;
+            text += ")";
         }
     }
     return text;
@@ -257,8 +275,8 @@ uint64_t now_unix_ms() {
     ULARGE_INTEGER value{};
     value.LowPart = file_time.dwLowDateTime;
     value.HighPart = file_time.dwHighDateTime;
-    // FILETIME counts 100 ns ticks since 1601-01-01; 116444736000000000 of them
-    // separate that epoch from the Unix epoch.
+    // FILETIME counts 100 ns ticks since 1601-01-01; this many of them separate that
+    // epoch from the Unix epoch.
     constexpr unsigned long long kFileTimeUnixEpochDelta = 116444736000000000ULL;
     if (value.QuadPart < kFileTimeUnixEpochDelta) {
         return 0;
@@ -266,8 +284,8 @@ uint64_t now_unix_ms() {
     return static_cast<uint64_t>((value.QuadPart - kFileTimeUnixEpochDelta) / 10000ULL);
 }
 
-// Resolves a system executable (System32 is always in the DLL search path but not
-// necessarily early in PATH, so try the explicit path first).
+// Resolves a system executable: try the explicit System32 path first, then let
+// CreateProcessW resolve the bare name through PATH (C:\Windows\System32\ is on it).
 std::wstring locate_system_executable(const wchar_t* file_name) {
     wchar_t system_directory[MAX_PATH] = {};
     const UINT length = GetSystemDirectoryW(system_directory, MAX_PATH);
@@ -279,7 +297,7 @@ std::wstring locate_system_executable(const wchar_t* file_name) {
             return candidate;
         }
     }
-    return std::wstring(file_name);  // CreateProcessW then resolves it through PATH
+    return std::wstring(file_name);
 }
 
 // Runs a command line, capturing merged stdout+stderr, with a hard timeout.
@@ -325,8 +343,7 @@ bool run_process_capture(const std::wstring& command_line, DWORD timeout_ms,
 
     if (created == FALSE) {
         CloseHandle(read_end);
-        error = "CreateProcessW(\"" + std::string(command_line.begin(), command_line.end()) +
-                "\") failed: " + system_error_text(create_error);
+        error = "CreateProcessW(\"" + narrow_ascii(command_line) + "\") failed: " + system_error_text(create_error);
         return false;
     }
 
@@ -394,9 +411,10 @@ bool run_process_capture(const std::wstring& command_line, DWORD timeout_ms,
 // ---------------------------------------------------------------------------
 
 NvmlApi load_nvml() {
-    // Candidate locations, in order: plain name (resolved through the DLL search
-    // order, which finds C:\Windows\System32\nvml.dll), the explicit System32 path,
-    // then the legacy NVSMI directory used by older drivers.
+    // Candidate locations, in order: the bare name (resolved through the DLL search
+    // order, which finds C:\Windows\System32\nvml.dll), the explicit System32 path
+    // (present and verified on the target machine), then the legacy NVSMI directory
+    // used by older drivers.
     std::vector<std::wstring> candidates;
     candidates.push_back(L"nvml.dll");
     wchar_t system_directory[MAX_PATH] = {};
@@ -423,10 +441,10 @@ NvmlApi load_nvml() {
         return GetProcAddress(module, symbol);
     };
 
+    // Entry points are resolved individually: a driver may not export a deprecated
+    // one, in which case the corresponding field simply stays unknown (-1).
     NvmlApi api;
     api.module = module;
-    // The entry points are resolved individually: a driver may legitimately not
-    // export a deprecated one, and the corresponding field then stays -1/unknown.
     api.init = reinterpret_cast<NvmlReturn(__cdecl*)(void)>(resolve("nvmlInit_v2"));
     api.shutdown = reinterpret_cast<NvmlReturn(__cdecl*)(void)>(resolve("nvmlShutdown"));
     api.device_get_count = reinterpret_cast<NvmlReturn(__cdecl*)(unsigned*)>(resolve("nvmlDeviceGetCount_v2"));
@@ -450,10 +468,11 @@ NvmlApi load_nvml() {
         reinterpret_cast<NvmlReturn(__cdecl*)(NvmlDevice, unsigned*)>(resolve("nvmlDeviceGetFanSpeed"));
     api.device_get_clock_info =
         reinterpret_cast<NvmlReturn(__cdecl*)(NvmlDevice, int, unsigned*)>(resolve("nvmlDeviceGetClockInfo"));
-    api.device_get_utilization_rates = reinterpret_cast<NvmlReturn(__cdecl*)(NvmlDevice, NvmlUtilization*)>(
-        resolve("nvmlDeviceGetUtilizationRates"));
-    api.device_get_current_clocks_throttle_reasons = reinterpret_cast<NvmlReturn(__cdecl*)(NvmlDevice, unsigned long long*)>(
-        resolve("nvmlDeviceGetCurrentClocksThrottleReasons"));
+    api.device_get_utilization_rates =
+        reinterpret_cast<NvmlReturn(__cdecl*)(NvmlDevice, NvmlUtilization*)>(resolve("nvmlDeviceGetUtilizationRates"));
+    api.device_get_current_clocks_throttle_reasons =
+        reinterpret_cast<NvmlReturn(__cdecl*)(NvmlDevice, unsigned long long*)>(
+            resolve("nvmlDeviceGetCurrentClocksThrottleReasons"));
     api.device_get_pcie_throughput =
         reinterpret_cast<NvmlReturn(__cdecl*)(NvmlDevice, int, unsigned*)>(resolve("nvmlDeviceGetPcieThroughput"));
     api.device_get_field_values =
@@ -498,8 +517,8 @@ bool read_memory_temperature(const NvmlApi& api, NvmlDevice device, double& out_
     return false;
 }
 
-// Power-management limit constraints (milliwatts). Cached at init() but refreshed
-// here when the initial query failed.
+// Power-management limit constraints in watts. Cached at init() and refreshed here
+// when the cached values are missing.
 bool read_power_constraints(const NvmlApi& api, NvmlDevice device, double& min_w, double& max_w) {
     if (api.device_get_power_limit_constraints == nullptr) {
         return false;
@@ -535,21 +554,6 @@ void read_nvml(const NvmlApi& api, NvmlDevice device, unsigned index, GpuTelemet
             out.temperature_c = static_cast<double>(value);
             temperature_ok = true;
         }
-    }
-    // Thresholds: only used to validate that the sensor family works; a missing
-    // memory threshold is the normal case on this SKU (MEM_MAX returns NOT_SUPPORTED).
-    if (api.device_get_temperature_threshold != nullptr) {
-        unsigned unused = 0;
-        (void)api.device_get_temperature_threshold(device, kNvmlThresholdSlowdown, &unused);
-        (void)api.device_get_temperature_threshold(device, kNvmlThresholdGpuMax, &unused);
-    }
-    if (api.device_get_temperature_threshold != nullptr) {
-        unsigned shutdown_c = 0;
-        (void)api.device_get_temperature_threshold(device, kNvmlThresholdShutdown, &shutdown_c);
-    }
-    if (api.device_get_temperature_threshold != nullptr) {
-        unsigned memory_limit_c = 0;
-        (void)api.device_get_temperature_threshold(device, kNvmlThresholdMemMax, &memory_limit_c);
     }
 
     double memory_temperature = -1.0;
@@ -636,13 +640,41 @@ void read_nvml(const NvmlApi& api, NvmlDevice device, unsigned index, GpuTelemet
     out.valid = temperature_ok && power_ok;
 }
 
+bool read_nvml_thermal_limits(const NvmlApi& api, NvmlDevice device, ThermalLimits& out) {
+    if (api.device_get_temperature_threshold == nullptr) {
+        return false;
+    }
+    bool any = false;
+    unsigned value = 0;
+    if (api.device_get_temperature_threshold(device, kNvmlThresholdSlowdown, &value) == kNvmlSuccess) {
+        out.slowdown_c = static_cast<double>(value);
+        any = true;
+    }
+    if (api.device_get_temperature_threshold(device, kNvmlThresholdShutdown, &value) == kNvmlSuccess) {
+        out.shutdown_c = static_cast<double>(value);
+        any = true;
+    }
+    if (api.device_get_temperature_threshold(device, kNvmlThresholdGpuMax, &value) == kNvmlSuccess) {
+        out.gpu_max_c = static_cast<double>(value);
+        any = true;
+    }
+    // Not supported on this SKU (verified) -> stays -1.
+    if (api.device_get_temperature_threshold(device, kNvmlThresholdMemMax, &value) == kNvmlSuccess) {
+        out.memory_max_c = static_cast<double>(value);
+        any = true;
+    }
+    out.valid = any;
+    return any;
+}
+
 // ---------------------------------------------------------------------------
 // nvidia-smi fallback backend.
 // ---------------------------------------------------------------------------
 //
-// Field order must stay in sync with the query string below. `nounits` keeps the
-// numbers bare; memory is reported in MiB, clocks in MHz, power in W and PCIe
-// throughput is not exposed by nvidia-smi at all (left at -1).
+// The field order must stay in sync with kNvidiaSmiQuery below. `nounits` keeps the
+// numbers bare: memory is reported in MiB, clocks in MHz, power in W, temperatures in
+// degrees Celsius. nvidia-smi does not expose PCIe throughput at all, so those fields
+// stay -1 in this backend.
 constexpr char kNvidiaSmiQuery[] =
     "index,name,temperature.gpu,temperature.memory,power.draw,power.limit,power.min_limit,"
     "power.max_limit,fan.speed,clocks.current.graphics,clocks.current.memory,memory.used,"
@@ -670,7 +702,7 @@ enum SmiField {
 
 bool run_nvidia_smi(const std::string& arguments, std::string& output, DWORD& exit_code, std::string& error) {
     std::wstring command = L"\"" + g_state.smi_path + L"\" ";
-    command.append(arguments.begin(), arguments.end());
+    command += widen_ascii(arguments);
     return run_process_capture(command, kCommandTimeoutMs, output, exit_code, error);
 }
 
@@ -694,6 +726,7 @@ bool nvidia_smi_probe(std::string& error) {
         error = "nvidia-smi reported no GPUs";
         return false;
     }
+
     g_state.handles.clear();
     g_state.names.clear();
     g_state.cached_min_w.clear();
@@ -813,7 +846,7 @@ void read_nvidia_smi(unsigned index, GpuTelemetry& out, std::string& error, bool
         out.memory_clock_mhz = value;
     }
     if (parse_number(fields[kSmiMemoryUsed], value)) {
-        // nvidia-smi reports memory in MiB with `nounits`.
+        // nvidia-smi reports memory in MiB when `nounits` is used.
         out.memory_used_bytes = static_cast<uint64_t>(value * 1024.0 * 1024.0);
     }
     if (parse_number(fields[kSmiMemoryTotal], value)) {
@@ -826,7 +859,7 @@ void read_nvidia_smi(unsigned index, GpuTelemetry& out, std::string& error, bool
         out.utilization_memory_percent = value;
     }
 
-    std::string throttle = trim(fields[kSmiThrottle]);
+    const std::string throttle = trim(fields[kSmiThrottle]);
     if (throttle.empty() == false && throttle != "N/A" && throttle.front() != '[') {
         char* end = nullptr;
         const unsigned long long reasons = std::strtoull(throttle.c_str(), &end, 16);
@@ -847,7 +880,7 @@ void read_nvidia_smi(unsigned index, GpuTelemetry& out, std::string& error, bool
 // ---------------------------------------------------------------------------
 std::vector<std::string> throttle_reason_words(uint64_t throttle_reasons) {
     // Bit values: see the table in telemetry.hpp. Order is chosen so that the
-    // mining-relevant limiters appear first.
+    // mining-relevant limiters come first.
     static const struct {
         uint64_t    bit;
         const char* word;
@@ -906,13 +939,13 @@ bool Telemetry::init(std::string& error) {
             if (g_state.ready) {
                 return true;
             }
-            error = "telemetry backend unavailable (already attempted)";
+            error = "telemetry backend unavailable (initialisation was already attempted)";
             return false;
         }
         g_state.initialised = true;
         error.clear();
 
-        std::string nvml_error;
+        std::string nvml_failure;
         NvmlApi api = load_nvml();
         if (api.usable()) {
             const NvmlReturn result = api.init();
@@ -927,7 +960,7 @@ bool Telemetry::init(std::string& error) {
                         NvmlDevice device = nullptr;
                         if (api.device_get_handle_by_index(index, &device) != kNvmlSuccess || device == nullptr) {
                             enumeration_ok = false;
-                            nvml_error = "nvmlDeviceGetHandleByIndex_v2 failed for GPU " + std::to_string(index);
+                            nvml_failure = "nvmlDeviceGetHandleByIndex_v2 failed for GPU " + std::to_string(index);
                             break;
                         }
                         g_state.handles.push_back(device);
@@ -962,33 +995,33 @@ bool Telemetry::init(std::string& error) {
                     g_state.cached_max_w.clear();
                     (void)api.shutdown();
                 } else {
-                    nvml_error = "nvmlDeviceGetCount_v2 reported no devices";
+                    nvml_failure = "nvmlDeviceGetCount_v2 reported no devices";
                     (void)api.shutdown();
                 }
             } else {
-                nvml_error = "nvmlInit_v2 failed: " + nvml_error_text(api, result);
-                if (api.module != nullptr) {
-                    FreeLibrary(api.module);
-                }
+                nvml_failure = "nvmlInit_v2 failed: " + nvml_error_text(api, result);
+            }
+            if (api.module != nullptr) {
+                FreeLibrary(api.module);
             }
         } else {
-            nvml_error = "nvml.dll could not be loaded or does not export the required entry points";
+            nvml_failure = "nvml.dll could not be loaded or does not export the required entry points";
             if (api.module != nullptr) {
                 FreeLibrary(api.module);
             }
         }
 
-        // Fall back to parsing nvidia-smi.
+        // Fall back to parsing nvidia-smi output.
         g_state.smi_path = locate_system_executable(L"nvidia-smi.exe");
-        std::string smi_error;
-        if (nvidia_smi_probe(smi_error)) {
+        std::string smi_failure;
+        if (nvidia_smi_probe(smi_failure)) {
             g_state.backend = Backend::NvidiaSmi;
             g_state.ready = true;
             return true;
         }
 
         g_state.backend = Backend::None;
-        error = "no usable GPU telemetry backend: NVML: " + nvml_error + "; nvidia-smi: " + smi_error;
+        error = "no usable GPU telemetry backend - NVML: " + nvml_failure + "; nvidia-smi: " + smi_failure;
         return false;
     } catch (...) {
         error = "unexpected exception while initialising telemetry";
@@ -1011,19 +1044,20 @@ void Telemetry::shutdown() {
         g_state.cached_min_w.clear();
         g_state.cached_max_w.clear();
         g_state.smi_cache_stamp_ms = 0;
+        g_state.smi_cache_index = 0;
         g_state.smi_cache_value = GpuTelemetry{};
+        g_state.smi_path.clear();
         g_state.backend = Backend::None;
         g_state.ready = false;
         g_state.initialised = false;
     } catch (...) {
-        // shutdown() must never propagate; the state is left as-is on failure.
+        // shutdown() never propagates; on failure the previous state is kept.
     }
 }
 
 size_t Telemetry::device_count() {
     try {
         std::shared_lock<std::shared_mutex> lock(g_state.mutex);
-        on_scope_exit:;
         return g_state.ready ? g_state.handles.size() : 0U;
     } catch (...) {
         return 0U;
@@ -1072,6 +1106,41 @@ bool Telemetry::read(unsigned index, GpuTelemetry& out, std::string& error) {
         return false;
     } catch (...) {
         error = "unexpected exception while reading telemetry";
+        return false;
+    }
+}
+
+bool Telemetry::read_thermal_limits(unsigned index, ThermalLimits& out, std::string& error) {
+    try {
+        std::shared_lock<std::shared_mutex> lock(g_state.mutex);
+        error.clear();
+        out = ThermalLimits{};
+        if (g_state.ready == false) {
+            error = "telemetry is not initialised";
+            return false;
+        }
+        if (index >= g_state.handles.size()) {
+            error = "GPU index " + std::to_string(index) + " is out of range (device count " +
+                    std::to_string(g_state.handles.size()) + ")";
+            return false;
+        }
+        if (g_state.backend != Backend::Nvml) {
+            // Note: do not call backend_name() here - it would take the shared lock
+            // again while this thread already holds it (deadlock risk with a waiting
+            // writer), so the name is derived from the state directly.
+            const char* name = (g_state.backend == Backend::NvidiaSmi) ? "nvidia-smi" : "none";
+            error = std::string("temperature thresholds are only available through the NVML backend (active backend: ") +
+                    name + ")";
+            return false;
+        }
+        if (read_nvml_thermal_limits(g_state.nvml, g_state.handles[index], out) == false) {
+            error = "nvmlDeviceGetTemperatureThreshold is not supported on this device";
+            out = ThermalLimits{};
+            return false;
+        }
+        return true;
+    } catch (...) {
+        error = "unexpected exception while reading thermal limits";
         return false;
     }
 }

@@ -88,7 +88,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/stratum_client_test.cpp")
   target_link_libraries(stratum_client_test PRIVATE ws2_32 grin_warnings)
 endif()
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/monitor/telemetry.cpp")
+set(GRIN_HAVE_MONITOR FALSE)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/monitor/telemetry.cpp"
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/monitor/gpu_control.cpp")
   add_library(grin_monitor STATIC
     src/monitor/telemetry.cpp
     src/monitor/gpu_control.cpp
@@ -98,22 +100,20 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/monitor/telemetry.cpp")
     "${CMAKE_CURRENT_SOURCE_DIR}/src/monitor"
   )
   target_link_libraries(grin_monitor PUBLIC grin_warnings)
+  set(GRIN_HAVE_MONITOR TRUE)
+else()
+  message(STATUS "grinforge: monitor module incomplete, skipping the miner binary")
 endif()
 
-# The miner binary needs both the host loop and the monitor module. Guarding on
-# both keeps `cmake --build` green while a module is still being written.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/host/main.cpp"
-   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/monitor/telemetry.cpp")
+# The miner binary needs both the host loop and the monitor module.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/host/main.cpp" AND GRIN_HAVE_MONITOR)
   add_executable(grinforge
     src/host/main.cpp
     src/host/http_api.cpp
     src/stratum/stratum_client.cpp
   )
   target_include_directories(grinforge PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-  target_link_libraries(grinforge PRIVATE grin_solver ws2_32 grin_warnings)
-  if(TARGET grin_monitor)
-    target_link_libraries(grinforge PRIVATE grin_monitor)
-  endif()
+  target_link_libraries(grinforge PRIVATE grin_solver ws2_32 grin_warnings grin_monitor)
 endif()
 
 message(STATUS "grinforge: CUDA architectures = ${CMAKE_CUDA_ARCHITECTURES}")

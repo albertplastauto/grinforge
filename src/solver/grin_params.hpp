@@ -60,7 +60,10 @@ typedef uint16_t word_t;
 #define NODE1MASK NODEMASK
 #define EDGEMASK NODEMASK
 #define NEDGES NNODES1
-#define NODEBITS (EDGEBITS + 1)
+// NOTE: do NOT define NODEBITS here. Upstream `lean.cu` defines
+// `NODEBITS (EDGEBITS + 1)` *after* including graph.hpp, because compress.hpp has
+// a member literally named NODEBITS; defining the macro earlier turns
+// `u32 NODEBITS;` into a syntax error. We do not need it at all.
 
 // SIZEMASK is only used by the CPU cycle finder: ~0 >> clz(PROOFSIZE) == 63 for 42.
 // constexpr so that SIZEMASK stays a compile-time constant (it sizes a stack array

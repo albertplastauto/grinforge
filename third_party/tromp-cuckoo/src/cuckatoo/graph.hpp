@@ -5,6 +5,12 @@
 #include "compress.hpp"
 #include <new>
 
+// LOCAL PATCH (GrinForge, documented in docs/third-party.md):
+//   `(sizeof(word_t) * 2 * MAXNODES)` / `(sizeof(link) * 2 * MAXEDGES)` use runtime member
+//   values as array bounds, i.e. the GCC/Clang variable-length-array extension.
+//   MSVC rejects that ("expression must have a constant value"), so the sizes are
+//   written as element_size * count. Semantically identical everywhere.
+
 typedef word_t proof[PROOFSIZE];
 
 // cuck(at)oo graph with given limit on number of edges (and on single partition nodes)
@@ -60,8 +66,8 @@ public:
     MAXNODES = maxnodes;
     MAXSOLS = maxsols;
     adjlist = new (bytes) word_t[2*MAXNODES]; // index into links array
-    links   = new (bytes += sizeof(word_t[2*MAXNODES])) link[2*MAXEDGES];
-    compressu = compressbits ? new compressor<word_t>(EDGEBITS, compressbits, bytes += sizeof(link[2*MAXEDGES])) : 0;
+    links   = new (bytes += (sizeof(word_t) * 2 * MAXNODES)) link[2*MAXEDGES];
+    compressu = compressbits ? new compressor<word_t>(EDGEBITS, compressbits, bytes += (sizeof(link) * 2 * MAXEDGES)) : 0;
     compressv = compressbits ? new compressor<word_t>(EDGEBITS, compressbits, bytes + compressu->bytes()) : 0;
     sharedmem = true;
     sols    = new  proof[MAXSOLS+1];
@@ -71,11 +77,11 @@ public:
   // total size of new-operated data, excludes sols and visited bitmap of MAXEDGES bits
   uint64_t bytes() {
     assert(2*MAXNODES != 0 && 2*MAXEDGES != 0); // allocation fails for uncompressed EDGEBITS=31
-    return sizeof(word_t[2*MAXNODES]) + sizeof(link[2*MAXEDGES]) + (compressu ? 2 * compressu->bytes() : 0);
+    return (sizeof(word_t) * 2 * MAXNODES) + (sizeof(link) * 2 * MAXEDGES) + (compressu ? 2 * compressu->bytes() : 0);
   }
 
   void reset() {
-    memset(adjlist, (char)NIL, sizeof(word_t[2*MAXNODES]));
+    memset(adjlist, (char)NIL, (sizeof(word_t) * 2 * MAXNODES));
     if (compressu) {
       compressu->reset();
       compressv->reset();
