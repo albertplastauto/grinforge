@@ -24,6 +24,10 @@ struct SolverConfig {
     // Kernel launch geometry. Upstream default is 128 blocks x 128 threads.
     uint32_t blocks = 128;
     uint32_t tpb = 128;
+    // Hard bound on depth-first steps in the CPU cycle search. A graph can never
+    // stall the miner: if the budget runs out the attempt is skipped and the next
+    // nonce starts. 400M steps is roughly 10x the observed cost of a C32 core.
+    uint64_t max_search_steps = 400ull * 1000ull * 1000ull;
 };
 
 struct FoundSolution {
@@ -77,6 +81,8 @@ public:
         // means the search itself finds nothing.
         uint64_t raw_cycles = 0;
         uint64_t verify_failures = 0;
+        uint64_t search_steps = 0;
+        bool     search_capped = false;   // step budget exhausted; graph skipped
     };
     LastRun last_run() const;
 

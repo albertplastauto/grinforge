@@ -35,7 +35,7 @@
 
 // Upstream headers, unmodified. They are designed to be included after the
 // parameter header has defined u32/word_t/PROOFSIZE/EDGEBITS/print_log.
-#include "graph.hpp"
+#include "cycle_finder.hpp"
 #include "siphash.cuh"
 #include "lean_solver.hpp"
 
@@ -57,11 +57,12 @@ namespace {
 #define PART_BITS 0
 #endif
 
-#ifndef IDXSHIFT
-#define IDXSHIFT (PART_BITS + 8)
-#endif
-
-#define MAXEDGES (NEDGES >> IDXSHIFT)
+// NOTE: upstream's `#define MAXEDGES (NEDGES >> IDXSHIFT)` and the whole
+// graph.hpp/compress.hpp path are gone. They were only needed to size the graph
+// that the (broken) compressed cycle finder built; `CycleFinder` sizes itself from
+// the actual surviving edge count, so the compressor's fixed 2^(EDGEBITS-IDXSHIFT)
+// table — which silently overflowed and returned garbage node ids — no longer
+// exists in this build.
 
 // CH-7 (see the helper section below): the leaf test needs a degree >= 2 counter,
 // which costs two bits per node.
@@ -199,8 +200,7 @@ struct LeanSolver::Impl {
     uint32_t* d_nonleaf = nullptr;
     u64* h_bits = nullptr;          // 512 MiB host copy of the alive bitmap
 
-    graph<word_t>* cg = nullptr;
-    proof* sols = nullptr;          // MAXSOLS solutions of PROOFSIZE edge indices
+    CycleFinder finder;
 
     siphash_keys sipkeys{};
     uint8_t pre_pow[GRIN_PRE_POW_SIZE] = {};
@@ -215,8 +215,6 @@ struct LeanSolver::Impl {
         if (d_alive) { cudaFree(d_alive); d_alive = nullptr; }
         if (d_nonleaf) { cudaFree(d_nonleaf); d_nonleaf = nullptr; }
         delete[] h_bits; h_bits = nullptr;
-        delete cg; cg = nullptr;
-        delete[] sols; sols = nullptr;
     }
 
     bool allocate(std::string& error) {
@@ -236,8 +234,6 @@ struct LeanSolver::Impl {
 
         try {
             h_bits = new u64[NEDGES / 64];
-            cg = new graph<word_t>(MAXEDGES, MAXEDGES, MAXSOLS, IDXSHIFT);
-            sols = new proof[MAXSOLS];
         } catch (const std::bad_alloc&) {
             error = "host allocation failed (need about 1.1 GiB of RAM for the graph)";
             return false;
@@ -278,43 +274,6 @@ struct LeanSolver::Impl {
         return true;
     }
 
-    // Build the compressed graph from the surviving edges.
-    void findcycles() {
-        cg->reset();
-        for (u64 block = 0; block < NEDGES; block += 64) {
-            u64 alive64 = ~h_bits[block / 64];
-            while (alive64) {
-                const int ffs = grin_ffs64(alive64);
-                const u64 nonce = block + (u64)(ffs - 1);
-                alive64 = (ffs == 64) ? 0ULL : (alive64 >> ffs);
-                const word_t u = sipnode(&sipkeys, (word_t)nonce, 0);
-                const word_t v = sipnode(&sipkeys, (word_t)nonce, 1);
-                cg->add_compress_edge(u, v);
-            }
-        }
-    }
-
-    // Map the compressed edge indices back to graph edge indices (nonces).
-    void uncompress_solutions() {
-        for (u32 s = 0; s < cg->nsols; ++s) {
-            u32 j = 0;
-            u64 nalive = 0;
-            bool done = false;
-            for (u64 block = 0; block < NEDGES && !done; block += 64) {
-                u64 alive64 = ~h_bits[block / 64];
-                while (alive64) {
-                    const int ffs = grin_ffs64(alive64);
-                    const u64 nonce = block + (u64)(ffs - 1);
-                    alive64 = (ffs == 64) ? 0ULL : (alive64 >> ffs);
-                    if (nalive++ == (u64)cg->sols[s][j]) {
-                        sols[s][j] = (word_t)nonce;
-                        if (++j == PROOFSIZE) { done = true; break; }
-                    }
-                }
-            }
-        }
-    }
-
     SolveStatus solve(uint64_t nonce, FoundSolution* out, int max_out, int& found,
                       std::string& error) {
         found = 0;
@@ -335,38 +294,45 @@ struct LeanSolver::Impl {
         }
         const double t_trim = now_ms();
 
-        // 3. Copy the alive bitmap back and count survivors.
+        // 3. Copy the alive bitmap back and hand it to the cycle finder.
         cudaError_t e = cudaMemcpy(h_bits, d_alive, kEdgeBytes, cudaMemcpyDeviceToHost);
         if (e != cudaSuccess) { error = cuda_err("cudaMemcpy(alive)", e); return SolveStatus::CudaError; }
 
-        u64 nedges = 0;
-        const u64 words = NEDGES / 64;
-        for (u64 i = 0; i < words; ++i) nedges += (u64)grin_popcount64(~h_bits[i]);
-        last.edges_after_trim = nedges;
+        last.verify_failures = 0;
+        last.raw_cycles = 0;
+        last.search_capped = false;
 
-        // CH-4: upstream exits the process here. A miner must instead treat this
-        // attempt as unusable and carry on with the next nonce.
-        if (nedges >= (u64)MAXEDGES) {
+        CycleFinder::Params fp;
+        fp.max_solutions = (max_out > 0 && max_out <= 8) ? max_out : 8;
+        fp.max_steps = cfg.max_search_steps;
+
+        // The finder reports a clean failure when the graph does not fit its node
+        // table, instead of the silent corruption the old compressor produced.
+        if (!finder.build(h_bits, (uint64_t)NEDGES, sipkeys, fp, error)) {
             last.trim_ms = t_trim - t_start;
             last.find_cycles_ms = 0.0;
             last.total_ms = now_ms() - t_start;
             return SolveStatus::Overloaded;
         }
+        last.edges_after_trim = finder.stats().alive_edges;
 
-        // 4. Find cycles in the compressed graph, then uncompress.
-        findcycles();
-        const double t_cycles = now_ms();
-        last.raw_cycles = cg->nsols;
-        last.verify_failures = 0;
-        uncompress_solutions();
+        // 4. Search for cycles of exactly PROOFSIZE edges.
+        RawSolution raw[8];
+        bool capped = false;
+        const int nsol = finder.search(raw, capped);
+        const double t_search = now_ms();
 
-        for (u32 s = 0; s < cg->nsols && found < max_out; ++s) {
+        last.raw_cycles = (uint64_t)nsol;
+        last.search_capped = capped;
+        last.search_steps = finder.stats().steps;
+
+        for (int s = 0; s < nsol && found < max_out; ++s) {
             FoundSolution fs;
             fs.nonce = nonce;
-            for (u32 i = 0; i < PROOFSIZE; ++i) fs.proof[i] = (uint32_t)sols[s][i];
+            for (u32 i = 0; i < PROOFSIZE; ++i) fs.proof[i] = raw[s].edges[i];
 
             // Independent verification: never report a cycle we cannot verify.
-            if (grin_verify((const word_t*)sols[s], &sipkeys) != POW_OK) {
+            if (grin_verify((const word_t*)raw[s].edges, &sipkeys) != POW_OK) {
                 ++last.verify_failures;
                 continue;
             }
@@ -376,7 +342,7 @@ struct LeanSolver::Impl {
         }
 
         last.trim_ms = t_trim - t_start;
-        last.find_cycles_ms = t_cycles - t_trim;
+        last.find_cycles_ms = t_search - t_trim;
         last.total_ms = now_ms() - t_start;
         return SolveStatus::Ok;
     }
