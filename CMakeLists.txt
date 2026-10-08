@@ -77,6 +77,7 @@ target_link_libraries(grin_solver PUBLIC grin_blake2b PRIVATE grin_warnings)
 # ---------------------------------------------------------------------------
 add_executable(solver_bench tools/solver_bench.cpp)
 target_link_libraries(solver_bench PRIVATE grin_solver grin_warnings)
+target_compile_definitions(solver_bench PRIVATE EDGEBITS=32 PROOFSIZE=42)
 set_target_properties(solver_bench PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
 
 # ---------------------------------------------------------------------------
@@ -99,7 +100,49 @@ target_link_libraries(grin_solver29 PUBLIC grin_blake2b PRIVATE grin_warnings)
 
 add_executable(solver_bench29 tools/solver_bench.cpp)
 target_link_libraries(solver_bench29 PRIVATE grin_solver29 grin_warnings)
+# The harness itself must use the same parameters as the solver it drives,
+# otherwise its host-side re-verification and masks are wrong.
+target_compile_definitions(solver_bench29 PRIVATE EDGEBITS=29 PROOFSIZE=42)
 set_target_properties(solver_bench29 PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+
+# ---------------------------------------------------------------------------
+# End-to-end pipeline self-test at deliberately tiny parameters.
+#
+# 42-cycles at 2^29/2^32 edges are rare, so "found nothing" cannot distinguish a
+# correct solver from a broken one. At EDGEBITS=20 with a 6-cycle the same code
+# path must find many solutions immediately, and every one of them must pass
+# grin_verify. If this binary finds cycles, the whole pipeline (header -> BLAKE2b
+# -> siphash -> trimming -> cycle search -> verification) is correct and the
+# absence of 42-cycles is purely a probability question.
+# ---------------------------------------------------------------------------
+add_library(grin_solver_tiny STATIC src/solver/lean_solver.cu)
+# IDXSHIFT sizes the cycle-finder graph (MAXEDGES = NEDGES >> IDXSHIFT). The C32
+# default of 8 would cap a 2^20 graph at 4096 edges while its 2-core is ~12000.
+target_compile_definitions(grin_solver_tiny PRIVATE EDGEBITS=20 PROOFSIZE=6 IDXSHIFT=4)
+target_include_directories(grin_solver_tiny PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/solver"
+  "${CUCKATOO_INC}"
+  "${CRYPTO_INC}"
+)
+target_link_libraries(grin_solver_tiny PUBLIC grin_blake2b PRIVATE grin_warnings)
+
+add_executable(solver_bench_tiny tools/solver_bench.cpp)
+target_compile_definitions(solver_bench_tiny PRIVATE EDGEBITS=20 PROOFSIZE=6)
+target_link_libraries(solver_bench_tiny PRIVATE grin_solver_tiny grin_warnings)
+set_target_properties(solver_bench_tiny PROPERTIES CUDA_SEPARABLE_COMPILATION OFF)
+
+# The independent CPU reference: builds the full graph with no trimming at all.
+add_executable(simple_ref_tiny tools/simple_ref.cpp)
+# print_log emits one line per cycle of ANY length, and short cycles are extremely
+# numerous, so console I/O would dominate the run. SQUASH_OUTPUT=1 makes print_log
+# a no-op (grin_params.hpp).
+target_compile_definitions(simple_ref_tiny PRIVATE EDGEBITS=20 PROOFSIZE=6 SQUASH_OUTPUT=1)
+target_include_directories(simple_ref_tiny PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/solver"
+  "${CUCKATOO_INC}"
+  "${CRYPTO_INC}"
+)
+target_link_libraries(simple_ref_tiny PRIVATE grin_blake2b grin_warnings)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/stratum_client_test.cpp")
   add_executable(stratum_client_test

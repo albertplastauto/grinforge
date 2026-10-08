@@ -71,12 +71,29 @@ public:
         double   total_ms = 0.0;
         uint64_t edges_after_trim = 0;
         uint64_t peak_device_bytes = 0;
+        // Cycles of length PROOFSIZE closed by the graph builder, BEFORE the
+        // uncompress + verify step. raw_cycles > 0 with `found == 0` means the
+        // cycle finder works and the edge-index recovery is wrong; raw_cycles == 0
+        // means the search itself finds nothing.
+        uint64_t raw_cycles = 0;
+        uint64_t verify_failures = 0;
     };
     LastRun last_run() const;
 
     // Diagnostics: the 32-byte BLAKE2b digest (== siphash key material) for a nonce.
     static void derive_keys(const uint8_t* pre_pow, size_t pre_pow_len, uint64_t nonce,
                             uint8_t out_digest32[32]);
+
+    // Diagnostics: compute the edge endpoints for edge indices [0, count) ON THE
+    // DEVICE, writing 2*count u32 (all u endpoints, then all v endpoints).
+    //
+    // Why this exists: the trim kernels generate edges with the device siphash
+    // (`dipnode`, which uses a uint2/PTX fast path), while findcycles() rebuilds
+    // the graph with the host siphash (`sipnode`). If those two implementations
+    // disagreed, the solver would trim one graph and search a different one, and
+    // would never find long cycles. This probe makes the comparison possible.
+    static bool device_probe(const uint8_t* pre_pow, size_t pre_pow_len, uint64_t header_nonce,
+                             uint32_t count, uint32_t* out_uv, std::string& error);
     // Bytes of device memory this configuration will allocate.
     static uint64_t device_bytes_for(const SolverConfig& cfg);
 

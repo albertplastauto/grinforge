@@ -145,6 +145,7 @@ int main(int argc, char** argv) {
     uint64_t nonceCount = 10;
     double   seconds = 0.0;
     bool     verifyOnly = false;
+    bool     deviceCheck = false;
     std::string prePowHex;
     std::string prePowFile;
 
@@ -179,6 +180,7 @@ int main(int argc, char** argv) {
             std::printf("\n");
             return 0;
         } else if (a == "--verify-only") verifyOnly = true;
+        else if (a == "--device-check") deviceCheck = true;
         else { std::printf("unknown option: %s\n", a.c_str()); return 2; }
     }
 
@@ -239,6 +241,40 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // Prove that the device siphash (uint2/PTX path in the trim kernels) and the
+    // host siphash (used to rebuild the graph for the cycle search) agree. If they
+    // did not, the solver would trim one graph and search another, and would never
+    // find a 42-cycle.
+    if (deviceCheck) {
+        const uint32_t N = 64;
+        std::vector<uint32_t> dev(2 * N);
+        std::string probeError;
+        if (!grin::LeanSolver::device_probe(pre.data(), pre.size(), nonceStart, N, dev.data(),
+                                            probeError)) {
+            std::printf("device_probe failed: %s\n", probeError.c_str());
+            return 1;
+        }
+        siphash_keys hk;
+        uint8_t hdr[GRIN_HEADER_LEN];
+        grin_build_header(pre.data(), pre.size(), nonceStart, hdr);
+        grin::grin_setheader(hdr, (uint32_t)GRIN_HEADER_LEN, &hk);
+        int mismatches = 0;
+        for (uint32_t i = 0; i < N; ++i) {
+            const uint32_t hu = (uint32_t)sipnode(&hk, (word_t)i, 0);
+            const uint32_t hv = (uint32_t)sipnode(&hk, (word_t)i, 1);
+            if (hu != dev[i] || hv != dev[N + i]) {
+                if (mismatches < 5) {
+                    std::printf("  MISMATCH edge %u: host u=%u v=%u | device u=%u v=%u\n", i, hu,
+                                hv, dev[i], dev[N + i]);
+                }
+                ++mismatches;
+            }
+        }
+        std::printf("device-vs-host siphash: %s (%d/%u mismatches)\n",
+                    mismatches ? "MISMATCH" : "agree", mismatches, N);
+        return mismatches ? 4 : 0;
+    }
+
     grin::LeanSolver solver(cfg);
     std::string error;
     if (!solver.set_pre_pow(pre.data(), pre.size(), error)) {
@@ -270,9 +306,10 @@ int main(int argc, char** argv) {
         else if (st == grin::SolveStatus::Aborted) status = "aborted";
 
         std::printf("nonce %-10" PRIu64 " %-10s trim=%7.1fms cycles=%6.1fms total=%7.1fms "
-                    "edges=%9" PRIu64 " sols=%d\n",
+                    "edges=%9" PRIu64 " raw_cycles=%u vfail=%u sols=%d\n",
                     nonce, status, last.trim_ms, last.find_cycles_ms, last.total_ms,
-                    last.edges_after_trim, nfound);
+                    last.edges_after_trim, (unsigned)last.raw_cycles,
+                    (unsigned)last.verify_failures, nfound);
 
         for (int s = 0; s < nfound; ++s) {
             // Re-verify independently and report the achieved difficulty.

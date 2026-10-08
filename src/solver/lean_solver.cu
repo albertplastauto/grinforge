@@ -166,6 +166,13 @@ __global__ void kill_leaf_edges(siphash_keys sipkeys, u32* alive, const u32* non
     }
 }
 
+__global__ void dipnode_probe_kernel(siphash_keys keys, u32 count, u32* out) {
+    const u32 i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    out[i] = (u32)dipnode(keys, (u64)i, 0);
+    out[count + i] = (u32)dipnode(keys, (u64)i, 1);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -349,6 +356,8 @@ struct LeanSolver::Impl {
         // 4. Find cycles in the compressed graph, then uncompress.
         findcycles();
         const double t_cycles = now_ms();
+        last.raw_cycles = cg->nsols;
+        last.verify_failures = 0;
         uncompress_solutions();
 
         for (u32 s = 0; s < cg->nsols && found < max_out; ++s) {
@@ -357,7 +366,10 @@ struct LeanSolver::Impl {
             for (u32 i = 0; i < PROOFSIZE; ++i) fs.proof[i] = (uint32_t)sols[s][i];
 
             // Independent verification: never report a cycle we cannot verify.
-            if (grin_verify((const word_t*)sols[s], &sipkeys) != POW_OK) continue;
+            if (grin_verify((const word_t*)sols[s], &sipkeys) != POW_OK) {
+                ++last.verify_failures;
+                continue;
+            }
 
             fs.cyclehash_leading_zeros = grin_cyclehash_leading_zeros(fs.proof);
             out[found++] = fs;
@@ -414,6 +426,44 @@ void LeanSolver::derive_keys(const uint8_t* pre_pow, size_t pre_pow_len, uint64_
     uint8_t header[GRIN_HEADER_LEN];
     grin_build_header(pre_pow, pre_pow_len, nonce, header);
     blake2b(out_digest32, 32, header, GRIN_HEADER_LEN, nullptr, 0);
+}
+
+bool LeanSolver::device_probe(const uint8_t* pre_pow, size_t pre_pow_len, uint64_t header_nonce,
+                              uint32_t count, uint32_t* out_uv, std::string& error) {
+    if (pre_pow_len != GRIN_PRE_POW_SIZE) {
+        error = "pre_pow must be exactly 238 bytes";
+        return false;
+    }
+    if (count == 0 || out_uv == nullptr) {
+        error = "device_probe needs a positive count and an output buffer";
+        return false;
+    }
+
+    uint8_t header[GRIN_HEADER_LEN];
+    grin_build_header(pre_pow, pre_pow_len, header_nonce, header);
+    siphash_keys keys;
+    grin_setheader(header, (u32)GRIN_HEADER_LEN, &keys);
+
+    const size_t bytes = sizeof(uint32_t) * 2 * (size_t)count;
+    uint32_t* d_out = nullptr;
+    cudaError_t e = cudaMalloc((void**)&d_out, bytes);
+    if (e != cudaSuccess) { error = cuda_err("cudaMalloc(probe)", e); return false; }
+
+    dipnode_probe_kernel<<<(count + 255) / 256, 256>>>(keys, count, d_out);
+    e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        error = cuda_err("dipnode_probe_kernel launch", e);
+        cudaFree(d_out);
+        return false;
+    }
+    e = cudaMemcpy(out_uv, d_out, bytes, cudaMemcpyDeviceToHost);
+    if (e != cudaSuccess) {
+        error = cuda_err("cudaMemcpy(probe)", e);
+        cudaFree(d_out);
+        return false;
+    }
+    cudaFree(d_out);
+    return true;
 }
 
 uint64_t LeanSolver::device_bytes_for(const SolverConfig&) {
