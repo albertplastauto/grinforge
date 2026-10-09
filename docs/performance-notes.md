@@ -222,17 +222,51 @@ highly reproducible - 5413.7 ms, 5412.6 ms and 5414.8 ms over three runs, within
 * **The hash is not the bottleneck.** Replacing siphash with one multiply changes nothing.
 * **The bitmap read is worth about 30%** of the round.
 
-### What remains unexplained
+### The profiler result, and everything it rules out
 
-Roughly 70% of the round is neither hashing, nor atomics, nor the bitmap read, and it
-scales with the number of edge visits rather than with the work done per visit. A simple
-per-edge model does not account for it: with 16,384 threads and 2^32 edges, each thread
-performs about 525,000 visits in 5.4 s, which is roughly 12 microseconds - tens of
-thousands of cycles - per visit, while only a few dozen instructions are involved.
+`ncu` on `count_node_deg` (section 6 has the command) reports:
 
-That gap needs a profiler rather than another guess. `ncu` is installed; the command is in
-section 6. Profiling `count_node_deg` is the next concrete step, and it needs the miner
-stopped and the UAC prompt accepted.
+```
+Compute (SM) Throughput .............  2.76 %
+DRAM Throughput ..................... 25.82 %
+L2 Cache Throughput ................. 24.80 %
+L1/TEX Hit Rate .....................  0 %
+L2 Hit Rate ......................... 32.82 %
+Warp Cycles Per Issued Instruction .. 203.08
+  of which ~162 cycles are a long-scoreboard stall (79.9% of all stalls)
+of 3.78 active warps per scheduler, only 0.02 were eligible per cycle
+OPT: grid too small - only 0.31 full waves across all SMs
+```
+
+Every percentage is low at once, and warps spend 203 cycles per issued instruction: the
+signature of a kernel that is stalled on memory rather than limited by compute, traffic or
+occupancy. The obvious follow-ups were then tested and all of them changed nothing on C32
+round 0 (baseline 5413 ms, reproducible to 0.02%):
+
+| Change | Round-0 trim | Verdict |
+|---|---|---|
+| none (baseline) | 5413 ms | — |
+| `atomicOr` -> plain `\|=` | 5538 ms | no effect |
+| `dipnode` -> a single multiply | 3806 ms | no effect |
+| grid 128 -> 8192 blocks (`--blocks`) | 5448-5487 ms | no effect |
+| `tpb` 128 -> 256 | 5446 ms | no effect |
+| `__launch_bounds__(128, 12)` | 5446-5494 ms | no effect |
+| never kill (removes the bitmap read) | 3779 ms | **−30%** |
+
+The grid sweep is the surprising one: a kernel the profiler calls under-occupied does not
+get faster with 64x more blocks or with forced higher occupancy. That means the resident
+warp count is not what limits it, and the "grid too small" advice is a red herring here.
+
+### What is left
+
+One third of a dense round is the random read of the 512 MiB bitmap, and that number is
+solid. The remaining two thirds is not hashing, not atomics, not occupancy, and not grid
+size; it scales with the number of edge visits, and I could not attribute it to a single
+cause with the tools available. Reporting that plainly is more useful than another guess:
+anyone picking this up should profile the *memory* side (`--section MemoryWorkloadAnalysis`
+with `--replay-mode range`) rather than reach for the usual occupancy and atomic tricks,
+because all of those have now been measured and none of them move the needle.
+
 
 ### One direction the numbers already justify
 
