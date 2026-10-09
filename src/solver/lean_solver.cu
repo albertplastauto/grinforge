@@ -269,9 +269,13 @@ struct LeanSolver::Impl {
         for (u32 round = 0; round < totalRounds; ++round) {
             if (abort_flag.load(std::memory_order_relaxed)) return false;
             for (u32 part = 0; part <= kPartMask; ++part) {
-                // The nonleaf bitmap is per-round state. Clearing 512 MiB per round
-                // is the single largest cost in this solver; measured and optimised
-                // separately (see docs/performance-notes.md).
+                // The nonleaf bitmap is per-round state. Clearing 512 MiB per round costs
+                // on the order of 0.15 s of a 16.9 s C32 graph, so it is NOT the dominant
+                // cost - an earlier comment here claimed it was, without measuring it.
+                // Measured ablations (docs/performance-notes.md section 7) show that the
+                // atomics and the hash are not the bottleneck either, that the random
+                // bitmap read is about 30% of a dense round, and that the rest is not yet
+                // explained by a per-edge model.
                 e = cudaMemset(d_nonleaf, 0, kNodeBytes);
                 if (e != cudaSuccess) { error = cuda_err("cudaMemset(nonleaf)", e); return false; }
 
