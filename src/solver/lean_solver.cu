@@ -41,6 +41,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -90,6 +91,22 @@ const u32 kNonPartBits = EDGEBITS - PART_BITS;
 // CH-1: 64-bit mask computation; ~0 when there is no partitioning.
 const word_t kNonPartMask =
     (PART_BITS == 0) ? (word_t)~0ULL : (word_t)(((u64)1 << kNonPartBits) - 1ULL);
+
+// ---------------------------------------------------------------------------
+// Dense tail
+// ---------------------------------------------------------------------------
+// Measured, not assumed: the cost of a trim round in the tail barely depends on how many
+// edges are still alive. Rounds 16-24, with 52M to 25M edges alive, cost 56.6 ms each;
+// rounds 120-128, with 1.16M to 1.03M alive, still cost 25.1 ms each. A 50x drop in live
+// edges buying only a 2x drop in time means the round is dominated by something that does
+// not scale with the edges: reading the 512 MiB alive bitmap in a grid-stride pattern with
+// a 64 KiB step, so every iteration lands in a different page and nothing can be prefetched.
+//
+// So once the graph has become sparse, the surviving edges are copied into a dense array and
+// the remaining rounds iterate that array instead. The bitmap scan disappears; 112 rounds x
+// ~20 ms is the 2.2 s this is meant to recover out of a ~17 s trim.
+const u32 kDenseAfterRound = 16;                   // bitmap rounds before switching
+const u32 kDenseCapacity = 64u * 1024u * 1024u;    // edges; 256 MiB per ping-pong buffer
 
 __device__ __forceinline__ bool in_partition(word_t u, u32 part) {
     if (PART_BITS == 0) return part == 0;   // everything belongs to partition 0
@@ -193,6 +210,87 @@ __global__ void dipnode_probe_kernel(siphash_keys keys, u32 count, u32* out) {
     out[count + i] = (u32)dipnode(keys, (u64)i, 1);
 }
 
+// One-off: copy the alive edges out of the inverted bitmap into a dense array.
+// Per-element atomicAdd is fine here because this runs once; the hot path is the per-round
+// compaction below, which aggregates per warp instead.
+__global__ void compact_alive_kernel(const u32* alive, u32* edges, u32* count) {
+    const u64 nthreads = (u64)blockDim.x * gridDim.x;
+    const u64 id = (u64)blockIdx.x * blockDim.x + threadIdx.x;
+    for (u64 block = id * 32; block < NEDGES; block += nthreads * 32) {
+        u32 alive32 = alive_block(alive, block);
+        u64 nonce = block - 1;
+        while (alive32) {
+            const u32 ffs = (u32)__ffs(alive32);
+            nonce += ffs;
+            safe_shift32(alive32, ffs);
+            edges[atomicAdd(count, 1u)] = (u32)nonce;
+        }
+    }
+}
+
+// Dense-tail pass 1: same rule as count_node_deg, but the edge list is an array.
+__global__ void count_node_deg_dense(siphash_keys sipkeys, const u32* edges, u32 count,
+                                     u32* nonleaf, u32 uorv, u32 part) {
+    const u32 stride = blockDim.x * gridDim.x;
+    for (u32 i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += stride) {
+        const word_t u = (word_t)dipnode(sipkeys, (u64)edges[i], uorv);
+        if (in_partition(u, part)) {
+            slot_seen_set(nonleaf, (word_t)(u & kNonPartMask));
+        }
+    }
+}
+
+// Dense-tail pass 2: keep an edge whose partner slot is occupied, and compact the survivors
+// into `out`. Survivors are appended, so `out` must be a separate buffer from `edges`.
+//
+// The loop is written with a UNIFORM trip count across the warp on purpose. An earlier
+// version used the natural `for (i = tid; i < count; i += stride)` shape and reserved space
+// per warp from lane 0: whenever lane 0 had already left the loop while other lanes were
+// still running, the reservation never happened and the whole warp wrote through a stale
+// base. The symptom was a survivor count that halved every round and reached zero, which
+// looked like an over-eager kill rule rather than a lost write. Iterating a fixed number of
+// steps with a `valid` predicate keeps the full warp active for every ballot.
+__global__ void kill_leaf_edges_dense(siphash_keys sipkeys, const u32* edges, u32 count,
+                                      u32* out, u32* outCount, const u32* nonleaf, u32 uorv,
+                                      u32 part) {
+    const u32 stride = blockDim.x * gridDim.x;
+    const u32 start = blockIdx.x * blockDim.x + threadIdx.x;
+    const u32 lane = threadIdx.x & 31u;
+    const u32 steps = (count + stride - 1u) / stride;
+    for (u32 k = 0; k < steps; ++k) {
+        const u32 i = start + k * stride;
+        const bool valid = i < count;
+        u32 nonce = 0u;
+        bool keep = false;
+        if (valid) {
+            nonce = edges[i];
+            const word_t u = (word_t)dipnode(sipkeys, (u64)nonce, uorv);
+            // Keep an edge when it is outside this partition (the pass does not touch it) or
+            // when its partner slot is occupied: the exact complement of the bitmap path's
+            // kill condition.
+            keep = !in_partition(u, part) ||
+                   slot_seen_test(nonleaf, (word_t)((u & kNonPartMask) ^ 1));
+        }
+        const unsigned mask = __ballot_sync(0xffffffffu, keep);
+        const unsigned rank = __popc(mask & ((1u << lane) - 1u));
+        u32 base = 0u;
+        if (lane == 0u) base = atomicAdd(outCount, (u32)__popc(mask));
+        base = __shfl_sync(0xffffffffu, base, 0);
+        if (keep) out[base + rank] = nonce;
+    }
+}
+
+// Rebuild the inverted alive bitmap from the dense survivor list, so the cycle finder can
+// keep using the bitmap path unchanged. The bitmap is filled with ones (everything dead)
+// and only the survivors are cleared, which costs one pass over the survivors instead of
+// one over all 2^32 edges.
+__global__ void scatter_alive_kernel(u32* alive, const u32* edges, u32 count) {
+    const u32 stride = blockDim.x * gridDim.x;
+    for (u32 i = blockIdx.x * blockDim.x + threadIdx.x; i < count; i += stride) {
+        atomicAnd(&alive[edges[i] >> 5], ~(1u << (edges[i] & 31)));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -219,6 +317,16 @@ struct LeanSolver::Impl {
     uint32_t* d_nonleaf = nullptr;
     u64* h_bits = nullptr;          // 512 MiB host copy of the alive bitmap
 
+    // Dense-tail ping-pong buffers and their device-side element counts. Allocated on a
+    // best-effort basis: if they do not fit, the solver keeps using the bitmap path, which
+    // is correct but slower.
+    u32* d_edges_a = nullptr;
+    u32* d_edges_b = nullptr;
+    u32* d_count_a = nullptr;
+    u32* d_count_b = nullptr;
+    bool dense_ready = false;
+    u32  dense_count = 0;
+
     CycleFinder finder;
 
     siphash_keys sipkeys{};
@@ -233,6 +341,11 @@ struct LeanSolver::Impl {
     void release() {
         if (d_alive) { cudaFree(d_alive); d_alive = nullptr; }
         if (d_nonleaf) { cudaFree(d_nonleaf); d_nonleaf = nullptr; }
+        if (d_edges_a) { cudaFree(d_edges_a); d_edges_a = nullptr; }
+        if (d_edges_b) { cudaFree(d_edges_b); d_edges_b = nullptr; }
+        if (d_count_a) { cudaFree(d_count_a); d_count_a = nullptr; }
+        if (d_count_b) { cudaFree(d_count_b); d_count_b = nullptr; }
+        dense_ready = false;
         delete[] h_bits; h_bits = nullptr;
     }
 
@@ -257,6 +370,35 @@ struct LeanSolver::Impl {
             error = "host allocation failed (need about 1.1 GiB of RAM for the graph)";
             return false;
         }
+
+        // Dense-tail buffers: best effort, 512 MiB in total. Failing to get them is not an
+        // error - the solver simply stays on the bitmap path.
+        const size_t denseBytes = (size_t)kDenseCapacity * sizeof(u32);
+        if (cudaMalloc((void**)&d_edges_a, denseBytes) == cudaSuccess &&
+            cudaMalloc((void**)&d_edges_b, denseBytes) == cudaSuccess &&
+            cudaMalloc((void**)&d_count_a, sizeof(u32)) == cudaSuccess &&
+            cudaMalloc((void**)&d_count_b, sizeof(u32)) == cudaSuccess) {
+            dense_ready = true;
+        } else {
+            if (d_edges_a) { cudaFree(d_edges_a); d_edges_a = nullptr; }
+            if (d_edges_b) { cudaFree(d_edges_b); d_edges_b = nullptr; }
+            if (d_count_a) { cudaFree(d_count_a); d_count_a = nullptr; }
+            if (d_count_b) { cudaFree(d_count_b); d_count_b = nullptr; }
+            cudaGetLastError();
+        }
+        return true;
+    }
+
+    // Copy the alive edges out of the inverted bitmap into the dense buffer, once.
+    bool densify(std::string& error) {
+        dense_count = 0;
+        cudaError_t e = cudaMemset(d_count_a, 0, sizeof(u32));
+        if (e != cudaSuccess) { error = cuda_err("cudaMemset(dense count)", e); return false; }
+        compact_alive_kernel<<<cfg.blocks, cfg.tpb>>>(d_alive, d_edges_a, d_count_a);
+        e = cudaGetLastError();
+        if (e != cudaSuccess) { error = cuda_err("compact_alive_kernel launch", e); return false; }
+        e = cudaMemcpy(&dense_count, d_count_a, sizeof(u32), cudaMemcpyDeviceToHost);
+        if (e != cudaSuccess) { error = cuda_err("dense count copy", e); return false; }
         return true;
     }
 
@@ -266,8 +408,38 @@ struct LeanSolver::Impl {
         if (e != cudaSuccess) { error = cuda_err("cudaMemset(alive)", e); return false; }
 
         const u32 totalRounds = cfg.ntrims;
+
+        // Dense-tail state, carried across rounds.
+        bool dense = false;
+        u32* edges = nullptr;
+        u32* edgesOut = nullptr;
+        u32* cnt = nullptr;
+        u32* cntOut = nullptr;
+        u32 count = 0;
+
         for (u32 round = 0; round < totalRounds; ++round) {
             if (abort_flag.load(std::memory_order_relaxed)) return false;
+
+            // Switch to the dense survivor list once, when the graph has become sparse.
+            // If anything about that fails, stay on the bitmap path for the rest of the
+            // rounds: slower, but always correct.
+            if (!dense && dense_ready && round == kDenseAfterRound) {
+                if (densify(error)) {
+                    if (std::getenv("GRINFORGE_TRIM_DEBUG") != nullptr) {
+                        std::fprintf(stderr, "[trim-debug] switched at round=%u edges=%u\n", round,
+                                     dense_count);
+                    }
+                }
+                if (dense_count > 0 && dense_count <= kDenseCapacity) {
+                    dense = true;
+                    count = dense_count;
+                    edges = d_edges_a;
+                    edgesOut = d_edges_b;
+                    cnt = d_count_a;
+                    cntOut = d_count_b;
+                }
+            }
+
             for (u32 part = 0; part <= kPartMask; ++part) {
                 // The nonleaf bitmap is per-round state. Clearing 512 MiB per round costs
                 // on the order of 0.15 s of a 16.9 s C32 graph, so it is NOT the dominant
@@ -279,19 +451,61 @@ struct LeanSolver::Impl {
                 e = cudaMemset(d_nonleaf, 0, kNodeBytes);
                 if (e != cudaSuccess) { error = cuda_err("cudaMemset(nonleaf)", e); return false; }
 
-                count_node_deg<<<cfg.blocks, cfg.tpb>>>(sipkeys, d_alive, d_nonleaf,
-                                                        round & 1u, part);
-                e = cudaGetLastError();
-                if (e != cudaSuccess) { error = cuda_err("count_node_deg launch", e); return false; }
+                if (!dense) {
+                    count_node_deg<<<cfg.blocks, cfg.tpb>>>(sipkeys, d_alive, d_nonleaf,
+                                                            round & 1u, part);
+                    e = cudaGetLastError();
+                    if (e != cudaSuccess) { error = cuda_err("count_node_deg launch", e); return false; }
 
-                kill_leaf_edges<<<cfg.blocks, cfg.tpb>>>(sipkeys, d_alive, d_nonleaf,
-                                                         round & 1u, part);
-                e = cudaGetLastError();
-                if (e != cudaSuccess) { error = cuda_err("kill_leaf_edges launch", e); return false; }
+                    kill_leaf_edges<<<cfg.blocks, cfg.tpb>>>(sipkeys, d_alive, d_nonleaf,
+                                                             round & 1u, part);
+                    e = cudaGetLastError();
+                    if (e != cudaSuccess) { error = cuda_err("kill_leaf_edges launch", e); return false; }
+                } else {
+                    count_node_deg_dense<<<cfg.blocks, cfg.tpb>>>(sipkeys, edges, count, d_nonleaf,
+                                                                  round & 1u, part);
+                    e = cudaGetLastError();
+                    if (e != cudaSuccess) { error = cuda_err("count_node_deg_dense launch", e); return false; }
+
+                    e = cudaMemset(cntOut, 0, sizeof(u32));
+                    if (e != cudaSuccess) { error = cuda_err("cudaMemset(dense count)", e); return false; }
+
+                    kill_leaf_edges_dense<<<cfg.blocks, cfg.tpb>>>(sipkeys, edges, count, edgesOut,
+                                                                   cntOut, d_nonleaf, round & 1u, part);
+                    e = cudaGetLastError();
+                    if (e != cudaSuccess) { error = cuda_err("kill_leaf_edges_dense launch", e); return false; }
+
+                    // The next launch needs the survivor count on the host. One copy per pass
+                    // is cheap next to the passes themselves.
+                    e = cudaMemcpy(&count, cntOut, sizeof(u32), cudaMemcpyDeviceToHost);
+                    if (e != cudaSuccess) { error = cuda_err("dense count copy", e); return false; }
+                    if (std::getenv("GRINFORGE_TRIM_DEBUG") != nullptr) {
+                        std::fprintf(stderr, "[trim-debug] round=%u part=%u survivors=%u\n",
+                                     round, part, count);
+                    }
+
+                    u32* tmp_edges = edges; edges = edgesOut; edgesOut = tmp_edges;
+                    u32* tmp_cnt = cnt; cnt = cntOut; cntOut = tmp_cnt;
+                }
 
                 if (abort_flag.load(std::memory_order_relaxed)) return false;
             }
         }
+
+        // Hand the survivors back to the inverted bitmap, so the cycle finder keeps using
+        // the same representation it always has. Filling with ones means "everything dead";
+        // only the survivors are then cleared, which costs one pass over the survivors
+        // rather than one over all 2^32 edges.
+        if (dense) {
+            e = cudaMemset(d_alive, 0xFF, kEdgeBytes);
+            if (e != cudaSuccess) { error = cuda_err("cudaMemset(alive, dead)", e); return false; }
+            if (count > 0) {
+                scatter_alive_kernel<<<cfg.blocks, cfg.tpb>>>(d_alive, edges, count);
+                e = cudaGetLastError();
+                if (e != cudaSuccess) { error = cuda_err("scatter_alive_kernel launch", e); return false; }
+            }
+        }
+
         e = cudaDeviceSynchronize();
         if (e != cudaSuccess) { error = cuda_err("cudaDeviceSynchronize", e); return false; }
         return true;
