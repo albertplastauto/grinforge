@@ -13,7 +13,7 @@ rem not hypothetical - it happened twice during development, once from a plain P
 rem command and once through an earlier version of this very file, each time ending in a
 rem mysterious exit code with no output. A PID file has none of that ambiguity.
 setlocal enabledelayedexpansion
-set PIDFILE=E:\grin-miner\logs\supervisor.pid
+set PIDFILE=%~dp0logs\supervisor.pid
 
 if exist "%PIDFILE%" (
   set /p SUPID=<"%PIDFILE%"

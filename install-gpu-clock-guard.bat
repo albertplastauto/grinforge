@@ -24,7 +24,8 @@ echo Removing any previous guard task, if present...
 schtasks /Delete /TN "%GUARD%" /F >nul 2>&1
 
 echo Creating the per-minute guard task (hidden launcher)...
-schtasks /Create /TN "%GUARD%" /TR "wscript.exe //B \"E:\grin-miner\tools\run-hidden.vbs\" \"powershell.exe -NoProfile -ExecutionPolicy Bypass -File E:\grin-miner\tools\gpu-clock-guard.ps1\"" /SC MINUTE /MO 1 /RL HIGHEST /F
+rem Paths come from %~dp0 so the task points at wherever this project actually sits.
+schtasks /Create /TN "%GUARD%" /TR "wscript.exe //B \"%~dp0tools\run-hidden.vbs\" \"powershell.exe -NoProfile -ExecutionPolicy Bypass -File %~dp0tools\gpu-clock-guard.ps1\"" /SC MINUTE /MO 1 /RL HIGHEST /F
 if errorlevel 1 (
   echo.
   echo FAILED - run this file as administrator.

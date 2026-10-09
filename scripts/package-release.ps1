@@ -47,8 +47,17 @@ Copy-Item (Join-Path $root 'third_party\tromp-cuckoo\LICENSE.txt') (Join-Path $s
 
 # Helper scripts an operator actually needs at the machine.
 foreach ($name in @('gpu-lock-2500.bat', 'gpu-unlock.bat', 'install-gpu-clock-guard.bat',
-                    'run-miner-forever.bat', 'run-miner-forever.ps1', 'stop-miner.bat')) {
+                    'install-gpu-clock-task.bat', 'run-miner-forever.bat', 'run-miner-forever.ps1',
+                    'stop-miner.bat', 'wallet.txt.example')) {
     Copy-Item (Join-Path $root $name) $stage
+}
+
+# install-gpu-clock-guard.bat references both of these, so leaving them out made the
+# packaged guard unrunnable. Found by checking what the packaged installer actually points
+# at rather than by assuming the copy list was complete.
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'tools') | Out-Null
+foreach ($name in @('gpu-clock-guard.ps1', 'run-hidden.vbs')) {
+    Copy-Item (Join-Path $root "tools\$name") (Join-Path $stage 'tools')
 }
 
 $zip = Join-Path $dist "grinforge-$Version-windows-x64.zip"

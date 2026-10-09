@@ -4,6 +4,57 @@ All notable changes to GrinForge. This project is young; the format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning is
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-10-09
+
+A maintenance release: two real bug fixes, a measured performance investigation that ruled
+out the usual optimisations, and a release package that can actually be unpacked anywhere.
+**No hashrate improvement** - saying that plainly is part of the release.
+
+### Fixed
+
+- **The GPU clock guard no longer flashes a console window every minute.** It was launched
+  as `powershell.exe -WindowStyle Hidden`, which still creates a console for a moment, so a
+  window visibly blinked on screen every 60 seconds. It now goes through `wscript.exe`
+  (`tools/run-hidden.vbs`), which has no console of its own.
+- **`stop-miner.bat` no longer kills its own caller.** It stopped the supervisor by
+  searching process command lines for `run-miner-forever.ps1` - a string that also appears
+  in the command line of any shell that merely mentions the file. It now uses the PID the
+  supervisor writes to `logs\supervisor.pid`. Hit twice during development, both times
+  presenting as an exit code of -1 with no output at all.
+- **The release package was incomplete.** `install-gpu-clock-guard.bat` was shipped without
+  the `tools\gpu-clock-guard.ps1` and `tools\run-hidden.vbs` it references, so the packaged
+  guard could not be installed.
+
+### Changed
+
+- The operator scripts derive their paths from their own location instead of hardcoding
+  `E:\grin-miner`, so the project works wherever it is unpacked.
+
+### Documented
+
+- **Where the trim time goes, measured rather than assumed.** A comment in the solver
+  claimed the 512 MiB bitmap clear was "the single largest cost in this solver". It had
+  never been measured and it is wrong: about 0.15 s of a 16.9 s graph. An ablation study on
+  C32 round 0 - the only round whose work is deterministic, with a baseline reproducible to
+  0.02% - plus an `ncu` profile, established the following:
+
+  | Change | Round-0 trim | Verdict |
+  |---|---|---|
+  | none (baseline) | 5413 ms | — |
+  | `atomicOr` -> plain `\|=` | 5538 ms | no effect |
+  | siphash -> a single multiply | 3806 ms | no effect |
+  | grid 128 -> 8192 blocks | 5448-5487 ms | no effect |
+  | `tpb` 128 -> 256 | 5446 ms | no effect |
+  | `__launch_bounds__(128, 12)` | 5446-5494 ms | no effect |
+  | never kill (removes the random 512 MiB read) | 3779 ms | **−30%** |
+
+  The profiler calls the kernel under-occupied ("0.31 full waves") and every utilisation
+  metric is low at once - SM 2.76%, DRAM 25.82%, L1 hit rate 0% - with 203 cycles per issued
+  instruction, ~162 of them a long-scoreboard stall. But 64x more blocks do not help, so the
+  occupancy advice is a red herring here. One third of a dense round is the random bitmap
+  read; the remaining two thirds is not the hash, not atomics and not occupancy, and it is
+  recorded as unattributed rather than guessed at.
+
 ## [0.1.0] - 2026-10-08
 
 First working release. It mines GRIN Cuckatoo32 on an NVIDIA Ada (sm_89) GPU under
@@ -62,4 +113,5 @@ documentation says so plainly.
 - Mining GRIN on a GPU is not competitive with ASICs. This project is about a correct,
   auditable, fee-free implementation.
 
+[0.2.0]: https://github.com/albertplastauto/grinforge/releases/tag/v0.2.0
 [0.1.0]: https://github.com/albertplastauto/grinforge/releases/tag/v0.1.0

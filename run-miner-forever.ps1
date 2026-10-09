@@ -26,14 +26,18 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
-$exe    = 'E:\grin-miner\build\cmake\grinforge.exe'
-$logDir = 'E:\grin-miner\logs'
+# Everything is derived from where this script lives, so the project can be unpacked
+# anywhere. Hardcoded absolute paths made the release unusable outside the machine it was
+# written on, which is exactly the machine it does not need to be portable for.
+$root   = Split-Path -Parent $MyInvocation.MyCommand.Path
+$exe    = Join-Path $root 'build\cmake\grinforge.exe'
+$logDir = Join-Path $root 'logs'
 
 # The wallet address is read from wallet.txt (gitignored) rather than hardcoded, so a
 # real address never lands in the public repository. Override with -Wallet for a second
 # machine, or point wallet.txt at a different address.
 if (-not $Wallet) {
-    $walletFile = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'wallet.txt'
+    $walletFile = Join-Path $root 'wallet.txt'
     if (-not (Test-Path $walletFile)) {
         Write-Host "error: $walletFile not found"
         Write-Host "       copy wallet.txt.example to wallet.txt and put your Grin address in it"
