@@ -143,7 +143,7 @@ the fourth — 1 solution at nonce 85 (`lz=3 difficulty=14848`); the last — ab
 has probability 9%, so a claim that it "works" requires a run over several hundred
 graphs.
 
-## 7. Measured tuning of GPU modes (`--tune`)
+## 6. Measured tuning of GPU modes (`--tune`)
 
 ```bat
 grinforge.exe --tune 25 --bench-pre-pow build\job.txt
@@ -193,7 +193,58 @@ into 8 GB — this is confirmed by lolMiner's failure on this very card
 (`OpenCL init failure: Invalid buffer size`). Our measured 0.054 GPS is confirmed
 independently: **the pool itself** estimates our hashrate at 0.07 GPS from accepted shares.
 
-## 6. Other economics
+## 7. Where the trim time actually goes (measured, not assumed)
+
+A comment in `lean_solver.cu` claimed that clearing the 512 MiB `nonleaf` bitmap was "the
+single largest cost in this solver". That was never measured and it is wrong: 128 rounds x
+512 MiB is 69 GB of memset traffic, which at this card's bandwidth is on the order of
+0.15 s of a 16.9 s graph. The cost is in the per-edge work, and this section measures
+which part of it.
+
+### Method
+
+Round 0 of the C32 trim is the only round whose input is deterministic: every edge is
+alive, so the amount of work cannot depend on what an ablation does to the graph.
+Measuring with `--ntrims 1` on C32 therefore isolates that round cleanly. The baseline is
+highly reproducible - 5413.7 ms, 5412.6 ms and 5414.8 ms over three runs, within 0.02%.
+
+| Ablation | Round-0 trim | Change |
+|---|---|---|
+| none (baseline) | 5413 ms | — |
+| `atomicOr` replaced by a plain `\|=` | 5538 ms | none, within noise |
+| never kill: removes the random 512 MiB bitmap read | 3779 ms | **−30%** |
+| ... and `dipnode` replaced by a single multiply | 3806 ms | none, within noise |
+
+### What this rules out
+
+* **Atomic contention is not the bottleneck.** Replacing `atomicOr` with a plain OR changes
+  nothing at all. Any optimisation aimed at aggregating atomics would buy nothing here.
+* **The hash is not the bottleneck.** Replacing siphash with one multiply changes nothing.
+* **The bitmap read is worth about 30%** of the round.
+
+### What remains unexplained
+
+Roughly 70% of the round is neither hashing, nor atomics, nor the bitmap read, and it
+scales with the number of edge visits rather than with the work done per visit. A simple
+per-edge model does not account for it: with 16,384 threads and 2^32 edges, each thread
+performs about 525,000 visits in 5.4 s, which is roughly 12 microseconds - tens of
+thousands of cycles - per visit, while only a few dozen instructions are involved.
+
+That gap needs a profiler rather than another guess. `ncu` is installed; the command is in
+section 6. Profiling `count_node_deg` is the next concrete step, and it needs the miner
+stopped and the UAC prompt accepted.
+
+### One direction the numbers already justify
+
+After the dense opening rounds only about 10^6 edges remain out of 2^32 - that is 0.02%.
+The late rounds nevertheless scan the whole 512 MiB bitmap bit by bit, which is why rounds
+17-128 still cost about 2.4 s despite having almost no edges left. **Compacting the
+surviving edges into a dense array** (the standard lean optimisation) removes that scan
+entirely. It does not explain the dense rounds, but it is a guaranteed win for the tail,
+and it is the only change in this document that is justified by measurement alone.
+
+
+## 8. Other economics
 
 The GRIN network is ~3.5–4 kGps, mined by ASICs (iPollo G1: 36 h/s at 2800 W). One
 4060 Ti provides 0.01–0.02% of the network; revenue per WhatToMine is on the order of $0.16/day
