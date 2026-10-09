@@ -5,7 +5,13 @@
 # Long-run supervisor for the GrinForge miner.
 #
 # Purpose: grind for days without supervision, and never lose the log.
-#   * one append-only log per calendar day under logs\, so nothing is overwritten;
+#   * one append-only log under logs\, named after the date the supervisor started, so
+#     nothing is ever overwritten. NOTE: the name is chosen once per launch, so a run that
+#     crosses midnight keeps appending to the file it started with - that is how the
+#     2026-10-08 log ended up holding entries until 07:00 the next morning. Nothing is lost,
+#     but the name is the launch date, not the calendar day of each line. Rotating while
+#     running would mean restarting the miner at midnight and throwing away the graph in
+#     flight, so this is documented rather than "fixed";
 #   * if the miner dies for any reason, it is restarted after 10 s and the restart is
 #     recorded with a timestamp alongside the miner's own output;
 #   * the miner's own dashboard line every 60 s gives a heartbeat in the same file.

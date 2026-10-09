@@ -84,7 +84,9 @@ documentation says so plainly.
 - **Guard against configuration drift**: a scheduled task keeps the 2500 MHz core-clock
   cap applied only while the miner runs, so games get the full boost.
 - **Long-run supervisor**: `run-miner-forever.ps1` restarts the miner if it dies and logs
-  to one append-only file per day.
+  to one append-only file named after the date the supervisor started. A run that crosses
+  midnight keeps appending to the file it started with - the name is the launch date, not
+  the calendar day of each line.
 - Documentation: protocol specification verified against a live pool, a post-mortem of two
   wrong diagnoses, measured performance notes, a licence attribution record, and a pinned
   validated environment with a re-validation procedure.

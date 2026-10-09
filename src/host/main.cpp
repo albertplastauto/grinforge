@@ -26,6 +26,7 @@
 #include <ctime>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -830,7 +831,22 @@ int main(int argc, char** argv) {
     // ---- mining thread ---------------------------------------------------
     std::atomic<uint64_t> currentGeneration{0};
     std::thread miner([&]() {
-        uint64_t nonce = 0;
+        // Start each job at a pseudo-random point in the nonce space rather than at 0.
+        // A graph takes ~18 s while the pool's job window is comparable in length, so a
+        // miner restarted inside the same job window replays the same nonces, finds
+        // exactly the same cycle, and submits a duplicate - seen in the log as
+        // "Duplicate share". Measured on this machine: 1 of 26 submits in one day, and
+        // every one of them followed a restart. Starting elsewhere makes that collision
+        // unlikely without changing anything else.
+        std::random_device rd;
+        std::mt19937_64 rng(((uint64_t)rd() << 32) ^ (uint64_t)rd() ^
+                            (uint64_t)std::chrono::steady_clock::now()
+                                .time_since_epoch()
+                                .count());
+        const uint64_t nonceBase = rng();
+        log_line("nonce space start: " + std::to_string(nonceBase) +
+                 " (randomised so a restart cannot replay the same nonces)");
+        uint64_t nonce = nonceBase;
         uint64_t localGeneration = 0;
         double   lastSolveSeconds = 0.0;
         bool     jobSeen = false;
@@ -858,7 +874,7 @@ int main(int argc, char** argv) {
                 if (!solver->set_pre_pow(job.pre_pow.data(), job.pre_pow.size(), err)) {
                     log_line("bad job pre_pow: " + err);
                 } else {
-                    nonce = 0;
+                    nonce = nonceBase;
                     jobSeen = true;
                     activeJob = job;
                     haveActiveJob = true;
