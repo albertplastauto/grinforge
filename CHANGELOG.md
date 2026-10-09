@@ -4,6 +4,52 @@ All notable changes to GrinForge. This project is young; the format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning is
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-09
+
+A performance release whose gain is measured and verified, plus a long-run test that has now
+accumulated real evidence: several shares found on C32, accepted by the pool, with no local
+verification failure.
+
+### Added
+
+- **Dense-tail edge trimming.** After 16 rounds the surviving edges are copied once into a
+  dense array and the remaining 112 rounds iterate that array instead of scanning the 512 MiB
+  alive bitmap. The motivation was measured, not assumed: a tail round costs 56.6 ms with 52M
+  edges alive and still 25.1 ms with 1.03M, so the round is dominated by the bitmap scan, not
+  by the edges. On C32 the trim goes 16,912 → 15,917 ms and the whole graph 18.36 → 17.34 s,
+  a 5.6% gain.
+
+  Verified by comparing edge counts against the recorded baselines rather than by trusting the
+  code: C29 stays at 428,633 edges and C32 at 1,026,168 (both exact), and the previously
+  verified C29 nonce-85 solution still reproduces as `raw_cycles=1 verify=OK lz=3`. Then
+  confirmed on the live pool: 4 accepted shares, 0 failed verifications.
+
+- **Randomised starting nonce.** The mining loop began every job at nonce 0, so a miner
+  restarted inside the same job window replayed the same nonces and submitted a duplicate;
+  the pool answered "Duplicate share". Each process now starts at a random point and logs it.
+
+### Fixed
+
+Two bugs introduced and caught while implementing the dense tail — neither by reading the
+code, both by comparing against known-good baselines:
+
+- The dense keep condition was inverted. The bitmap path kills an edge whose partner slot is
+  absent, so the dense path must keep it when the slot is present; the first version kept the
+  leaves instead, leaving a graph an order of magnitude too large (C29: 1.25M edges against
+  428,633) and losing a previously verified solution.
+- Warp-aggregated appends lost writes. Space was reserved by lane 0, but in an index-strided
+  loop lane 0 can finish while other lanes are still running, so no reservation happened and
+  the warp wrote through a stale base. The symptom was a survivor count that halved every
+  round and reached zero, which reads like an over-eager kill rule. The loop now uses a
+  uniform trip count so the full warp participates in every ballot.
+
+### Documented
+
+- Where the trim time goes: the ablations that ruled out atomics, the hash, grid size and
+  occupancy, and the `ncu` profile behind them.
+- The supervisor's log naming — the file is named after the launch date, not the calendar day,
+  so a run crossing midnight keeps appending to the file it started with.
+
 ## [0.2.0] - 2026-10-09
 
 A maintenance release: two real bug fixes, a measured performance investigation that ruled
@@ -115,5 +161,6 @@ documentation says so plainly.
 - Mining GRIN on a GPU is not competitive with ASICs. This project is about a correct,
   auditable, fee-free implementation.
 
+[0.3.0]: https://github.com/albertplastauto/grinforge/releases/tag/v0.3.0
 [0.2.0]: https://github.com/albertplastauto/grinforge/releases/tag/v0.2.0
 [0.1.0]: https://github.com/albertplastauto/grinforge/releases/tag/v0.1.0
