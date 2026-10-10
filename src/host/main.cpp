@@ -376,32 +376,40 @@ void log_sink_write(const std::string& line) {
     std::fflush(g_log_sink);
 }
 
-// Render a box table whose bars are derived from the cell widths, so the output cannot come
-// out ragged the way hand-written padding eventually does.
-//
-// Colours are applied per cell, and the widths are always measured on the PLAIN text: wrapping
-// a padded cell in escape codes would otherwise make every coloured column one padding step too
-// wide, which is exactly how coloured tables end up looking worse than plain ones.
-std::string render_table(const std::vector<std::string>& header,
-                         const std::vector<std::vector<std::string>>& rows,
-                         const std::vector<std::vector<const char*>>& colors = {}) {
-    std::vector<size_t> w(header.size());
-    for (size_t i = 0; i < header.size(); ++i) w[i] = header[i].size();
+// Cell widths are computed separately from rendering so that several tables can share one grid.
+// Tables with different column counts, or with independently sized columns, end up with right
+// edges that do not line up - which is exactly how a panel starts to look untidy.
+void table_widths(const std::vector<std::string>& header,
+                  const std::vector<std::vector<std::string>>& rows, std::vector<size_t>& widths) {
+    if (widths.size() < header.size()) widths.resize(header.size(), 0);
+    for (size_t i = 0; i < header.size(); ++i) {
+        if (header[i].size() > widths[i]) widths[i] = header[i].size();
+    }
     for (const auto& r : rows) {
-        for (size_t i = 0; i < r.size() && i < w.size(); ++i) {
-            if (r[i].size() > w[i]) w[i] = r[i].size();
+        for (size_t i = 0; i < r.size() && i < widths.size(); ++i) {
+            if (r[i].size() > widths[i]) widths[i] = r[i].size();
         }
     }
+}
+
+// Render a box table against a width grid produced by table_widths, so callers can make several
+// tables agree. Colours are applied per cell and all padding comes from the PLAIN text: wrapping
+// an already padded cell in escape codes would widen every coloured column by the length of the
+// sequence and break the frame.
+std::string render_table(const std::vector<std::string>& header,
+                         const std::vector<std::vector<std::string>>& rows,
+                         const std::vector<size_t>& widths,
+                         const std::vector<std::vector<const char*>>& colors = {}) {
     const auto bar = [&]() {
         std::string s = "+";
-        for (size_t i = 0; i < w.size(); ++i) s += std::string(w[i] + 2, '-') + "+";
+        for (size_t i = 0; i < widths.size(); ++i) s += std::string(widths[i] + 2, '-') + "+";
         return s + "\n";
     };
     const auto row = [&](const std::vector<std::string>& r, const std::vector<const char*>* cs) {
         std::string s = "|";
-        for (size_t i = 0; i < w.size(); ++i) {
+        for (size_t i = 0; i < widths.size(); ++i) {
             const std::string cell = i < r.size() ? r[i] : std::string();
-            const std::string pad(w[i] - cell.size(), ' ');
+            const std::string pad(widths[i] - cell.size(), ' ');
             const char* c = (cs != nullptr && i < cs->size()) ? (*cs)[i] : nullptr;
             s += " ";
             if (c != nullptr && g_color) s += std::string(c) + cell + "\x1b[0m" + pad;
@@ -1285,8 +1293,9 @@ int main(int argc, char** argv) {
                 row1.push_back(gpuShort);
                 std::snprintf(cell, sizeof(cell), "%.4f G/s", gps);
                 row1.push_back(cell);
-                std::snprintf(cell, sizeof(cell), "%llu / %llu",
-                              (unsigned long long)s.accepted, (unsigned long long)s.rejected);
+                std::snprintf(cell, sizeof(cell), "%llu", (unsigned long long)s.accepted);
+                row1.push_back(cell);
+                std::snprintf(cell, sizeof(cell), "%llu", (unsigned long long)s.rejected);
                 row1.push_back(cell);
                 std::snprintf(cell, sizeof(cell), "%.1f W", telemetryOk ? t.power_w : 0.0);
                 row1.push_back(cell);
@@ -1321,8 +1330,9 @@ int main(int argc, char** argv) {
                     1, std::vector<const char*>(row2.size(), nullptr));
                 colors1[0][1] = kColLabel;                                     // GPU name
                 colors1[0][2] = (gps > 0.0) ? kColGood : kColWarn;             // speed
-                colors1[0][3] = (s.accepted >= s.rejected) ? kColGood : kColWarn;
-                colors1[0][5] = kColGood;                                     // efficiency
+                colors1[0][3] = (s.accepted > 0) ? kColGood : kColDim;         // accepted
+                colors1[0][4] = (s.rejected > 0) ? kColWarn : kColDim;         // rejected
+                colors1[0][6] = kColGood;                                     // efficiency
                 const double tempC = telemetryOk ? t.temperature_c : 0.0;
                 colors2[0][1] = kColLabel;
                 colors2[0][2] = (tempC >= cfg.temp_limit_c - 8.0) ? kColBad
@@ -1331,11 +1341,18 @@ int main(int argc, char** argv) {
                 colors2[0][5] = kColDim;
                 colors2[0][6] = kColDim;
 
-                std::string block =
-                    render_table({"ID", "GPU", "Speed", "Shares a/r", "Power", "Efficiency"},
-                                 {row1}, colors1) +
-                    render_table({"ID", "GPU", "Temp", "Fan", "Core", "Mem", "VRAM"}, {row2},
-                                 colors2);
+                // Both tables are rendered against ONE width grid, and both have the same column
+                // count, so their frames line up exactly. Different column counts or independently
+                // sized columns left the right edges ragged, which is what the operator saw.
+                const std::vector<std::string> head1 = {"ID", "GPU",     "Speed", "Acc", "Rej",
+                                                       "Power", "Efficiency"};
+                const std::vector<std::string> head2 = {"ID", "GPU", "Temp", "Fan", "Core", "Mem",
+                                                       "VRAM"};
+                std::vector<size_t> grid;
+                table_widths(head1, {row1}, grid);
+                table_widths(head2, {row2}, grid);
+                std::string block = render_table(head1, {row1}, grid, colors1) +
+                                    render_table(head2, {row2}, grid, colors2);
 
                 const int ups = (int)seconds_since(processStart);
                 std::snprintf(dash, sizeof(dash),
