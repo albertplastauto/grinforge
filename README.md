@@ -49,6 +49,18 @@ Properties worth knowing:
 * **The mining process never needs administrator rights.** GPU control flags report
   refusal with a reason instead of silently doing nothing; the one privileged action is a
   separate one-shot `--install-gpu-profile`, which exits immediately.
+* **Set the fan yourself — a fixed speed beats a curve.** This card's own fan curve stops the
+  fan entirely when it decides the GPU is cool enough, so under a steady mining load it cycled
+  0 → 31 % → 0 and the temperature sawtoothed 44–62 °C. A fixed 40 % hold gives 41–44 °C with a
+  3 °C spread, at slightly *lower* power, because a cool die leaks less. The card is not
+  misbehaving — 62 °C is far below its 83 °C target — the argument is wear: a steady load driven
+  by a stop-start fan thermally cycles the die and the solder joints many times a day, and that
+  is a real ageing mechanism. Steady rotation under steady load is kinder than dynamic control
+  chasing a threshold. This must be set **externally** (NVIDIA app, MSI Afterburner): NVAPI
+  returns `NOT_SUPPORTED` for cooler settings on consumer GeForce cards, which is why `--fan`
+  refuses with a reason instead of pretending, and why the miner reads fan speed but never writes
+  it — it cannot fight whatever you configure. Measurements in `docs/performance-notes.md`,
+  section 9.
 * **Wallet guard.** `--allow-address` makes the miner refuse to start unless the address
   it would mine to is exactly the one you intend, so a tampered `.bat` cannot silently
   redirect your hashrate.
@@ -334,26 +346,4 @@ it until the mining state changes — which is exactly why it compares the state
 saved one instead of poking the GPU every minute.
 
 The measurements and the reasoning are in `docs/performance-notes.md`, section 7.
-
-## API price peak hours (accounted for in the workflow)
-
-The project is run with an eye on **DeepSeek API prices**, not on electricity tariffs.
-The source is [Models & Pricing, DeepSeek API Docs](https://api-docs.deepseek.com/quick_start/pricing/):
-
-> Peak hours are 01:00–04:00 and 06:00–10:00 UTC, Monday through Friday, excluding
-> Chinese public holidays. All other hours are off-peak, including weekends and
-> Chinese public holidays in full. Off-peak rates are half of the peak rates.
-
-| | UTC (weekdays, excluding PRC holidays) | Moscow (UTC+3) |
-|---|---|---|
-| **Peak (full price)** | 01:00–04:00 and 06:00–10:00 | **04:00–07:00 and 09:00–13:00** |
-| **Off-peak (half price)** | all other hours | 13:00–04:00 and all weekends |
-
-During peak windows, expensive activity (long runs, builds, profiling) is paused; the
-miner keeps running and logging events so as not to lose statistics. Reminders are set for
-04:00 and 09:00 MSK (wind down) and 07:00 and 13:00 MSK (resume) on weekdays.
-
-Caveat: the code does not track PRC public holidays — on those days the peak is not
-actually in effect, and the schedule can be ignored.
-
 

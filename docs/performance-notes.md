@@ -121,12 +121,6 @@ Important: trimming **preserves cycles at any number of rounds** (only leaves ar
 removed), so reducing `ntrims` does not lose solutions — it only makes the graph
 larger for the search.
 
-### 4.6 Economics of API calls
-Work on the project is paused during DeepSeek API peak-price hours (see README):
-peak is 01:00–04:00 and 06:00–10:00 UTC on weekdays, that is 04:00–07:00 and 09:00–13:00
-Moscow time; at all other times it is half price. This is not a hashrate optimization
-but a direct saving on development cost.
-
 ## 5. Mandatory verification commands
 
 ```bat
