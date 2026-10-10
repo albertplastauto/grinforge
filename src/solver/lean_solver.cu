@@ -563,11 +563,22 @@ struct LeanSolver::Impl {
         last.raw_cycles = (uint64_t)nsol;
         last.search_capped = capped;
         last.search_steps = finder.stats().steps;
-        print_log("  finder: edges=%llu nodes=%llu full_slot_nodes=%llu steps=%llu cap=%d\n",
-                  (unsigned long long)finder.stats().alive_edges,
-                  (unsigned long long)finder.stats().nodes,
-                  (unsigned long long)finder.stats().full_nodes,
-                  (unsigned long long)finder.stats().steps, capped ? 1 : 0);
+        // Cycle-search diagnostics: how many edges survived trimming, how many distinct nodes
+        // they touch, how many nodes have BOTH slots occupied (the quantity that proved the node
+        // model), how many DFS steps the search took and whether it hit the cap.
+        //
+        // Kept, but no longer printed by default: it is developer detail, it is not timestamped,
+        // and being written straight to stdout it broke the in-place dashboard in the visible
+        // window. The same numbers remain available through last_run() - solver_bench prints
+        // them - so this only has to be reachable, not visible. Same convention as
+        // GRINFORGE_TRIM_DEBUG below.
+        if (std::getenv("GRINFORGE_SOLVER_DEBUG") != nullptr) {
+            print_log("  finder: edges=%llu nodes=%llu full_slot_nodes=%llu steps=%llu cap=%d\n",
+                      (unsigned long long)finder.stats().alive_edges,
+                      (unsigned long long)finder.stats().nodes,
+                      (unsigned long long)finder.stats().full_nodes,
+                      (unsigned long long)finder.stats().steps, capped ? 1 : 0);
+        }
 
         for (int s = 0; s < nsol && found < max_out; ++s) {
             FoundSolution fs;
