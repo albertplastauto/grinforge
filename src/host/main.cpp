@@ -315,7 +315,6 @@ bool stdout_is_console() {
 // Optional append-only log file. Running with a visible window must not cost us the log,
 // so every line printed to the console is written here as well.
 std::FILE* g_log_sink = nullptr;
-bool       g_dashboard_on_screen = false;   // true while the dashboard is the bottom line
 
 void log_sink_open(const std::string& path) {
     if (path.empty()) return;
@@ -333,17 +332,57 @@ void log_sink_write(const std::string& line) {
     std::fflush(g_log_sink);
 }
 
+// Render a box table whose bars are derived from the cell widths, so the output cannot come
+// out ragged the way hand-written padding eventually does.
+std::string render_table(const std::vector<std::string>& header,
+                         const std::vector<std::vector<std::string>>& rows) {
+    std::vector<size_t> w(header.size());
+    for (size_t i = 0; i < header.size(); ++i) w[i] = header[i].size();
+    for (const auto& r : rows) {
+        for (size_t i = 0; i < r.size() && i < w.size(); ++i) {
+            if (r[i].size() > w[i]) w[i] = r[i].size();
+        }
+    }
+    const auto bar = [&]() {
+        std::string s = "+";
+        for (size_t i = 0; i < w.size(); ++i) s += std::string(w[i] + 2, '-') + "+";
+        return s + "\n";
+    };
+    const auto row = [&](const std::vector<std::string>& r) {
+        std::string s = "|";
+        for (size_t i = 0; i < w.size(); ++i) {
+            const std::string cell = i < r.size() ? r[i] : std::string();
+            s += " " + cell + std::string(w[i] - cell.size(), ' ') + " |";
+        }
+        return s + "\n";
+    };
+    std::string out = bar() + row(header) + bar();
+    for (const auto& r : rows) out += row(r);
+    return out + bar();
+}
+
+// Number of lines currently occupied by the console dashboard, so the next repaint can erase
+// exactly that block instead of scrolling.
+int g_dashboard_lines = 0;
+
+void dashboard_clear() {
+    if (g_dashboard_lines <= 0) return;
+    std::printf("\x1b[%dA\x1b[0J", g_dashboard_lines);
+    g_dashboard_lines = 0;
+    std::fflush(stdout);
+}
+
 void log_line(const std::string& s) {
     // Timestamps are not cosmetic here: the pool drops the connection every couple
     // of minutes and a share submitted just before a drop never gets a response, so
     // correlating submits with drops is the only way to tell those apart.
     const std::string line = "[" + timestamp_str() + "] " + s;
+    // Erase the dashboard block first: otherwise a log line would be printed below it and the
+    // next repaint would overwrite the log instead of the block.
+    dashboard_clear();
     std::printf("%s\n", line.c_str());
     std::fflush(stdout);
     log_sink_write(line);
-    // Something else is now the bottom line, so the next dashboard must not try to
-    // overwrite it.
-    g_dashboard_on_screen = false;
 }
 
 // Pull a 238-byte pre_pow out of a captured stratum line or a bare hex string.
@@ -454,8 +493,44 @@ int main(int argc, char** argv) {
 
     log_sink_open(cfg.log_file);
 
-    std::printf("GrinForge - GRIN Cuckatoo32 miner (0%% dev fee)\n");
-    std::printf("================================================\n");
+    // Startup banner, presented the way GPU miners usually are: a configuration block first,
+    // then a timestamped log. Everything here is known before the solver is created, so a
+    // reader can see at a glance what is mined, to which wallet, and under which limits.
+    std::printf("+--------------------------------------------------------------+\n");
+    std::printf("|           GrinForge - GRIN Cuckatoo32 GPU miner              |\n");
+    std::printf("|                0 %% developer fee, MIT licensed              |\n");
+    std::printf("+--------------------------------------------------------------+\n");
+    std::printf("Algorithm:         Cuckatoo32 lean (CUDA)\n");
+    std::printf("DevFee:            0 %%\n");
+    std::printf("Server:\n");
+    for (size_t i = 0; i < cfg.pools.size(); ++i) {
+        std::printf("  %-15s %s:%u%s\n", i == 0 ? "host:" : "failover:",
+                    cfg.pools[i].host.c_str(), (unsigned)cfg.pools[i].port,
+                    i == 0 ? "" : "");
+    }
+    std::printf("  %-15s %s\n", "user:", cfg.user.empty() ? "(none)" : cfg.user.c_str());
+    std::printf("  %-15s %s\n", "password:", cfg.pass.c_str());
+    std::printf("Wallet guard:      %s\n",
+                cfg.allowed_addresses.empty() ? "not set (add --allow-address)"
+                                              : "enforced (address must match the allowlist)");
+    std::printf("Solver:            ntrims=%u blocks=%u tpb=%u\n", cfg.ntrims, cfg.blocks,
+                cfg.tpb);
+    std::printf("Temperature limit: %.0f C\n", cfg.temp_limit_c);
+    std::printf("HTTP API:          %s\n",
+                cfg.api_port == 0 ? "off"
+                                  : ("http://127.0.0.1:" + std::to_string(cfg.api_port) +
+                                     "/stat")
+                                        .c_str());
+    std::printf("--------------------------------------------------------------\n");
+    // The banner above goes to the console; record the same essentials in the log file, which
+    // otherwise would show sessions without saying what they were mining or with which limits.
+    log_sink_write("config: algorithm=Cuckatoo32-lean devfee=0% pool=" + cfg.pools[0].host + ":" +
+                   std::to_string(cfg.pools[0].port) + " user=" + cfg.user + " ntrims=" +
+                   std::to_string(cfg.ntrims) + " blocks=" + std::to_string(cfg.blocks) +
+                   " tpb=" + std::to_string(cfg.tpb) + " temp_limit=" +
+                   std::to_string((int)cfg.temp_limit_c) + " api_port=" +
+                   std::to_string(cfg.api_port) +
+                   (cfg.allowed_addresses.empty() ? " wallet_guard=off" : " wallet_guard=on"));
 
     // ---- device -----------------------------------------------------------
     std::string devName;
@@ -1026,6 +1101,7 @@ int main(int argc, char** argv) {
     // ---- watchdog and dashboard -----------------------------------------
     auto lastReport = Clock::now();
     bool clockAdviceGiven = false;
+    double energyKwh = 0.0;      // accumulated from measured power, shown in the dashboard
     uint64_t lastAttempts = 0;
     while (!g_stop.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -1097,47 +1173,89 @@ int main(int argc, char** argv) {
             const double interval = cfg.report_seconds;
             const double gps = (double)(attempts - lastAttempts) / interval;
             lastAttempts = attempts;
+            energyKwh += (telemetryOk ? t.power_w : 0.0) / 1000.0 * interval / 3600.0;
             const auto s = get_client()->stats();
 
-            // Built as a string first so the same text can go to the console and to the log
-            // file. On a console the line is repainted in place instead of scrolling, which is
-            // what every other miner does; when redirected it stays line-oriented so the log
-            // remains greppable.
+            // One greppable line, always: the log file must stay machine-readable even while
+            // the console gets the pretty version.
             char dash[512];
-            int used = std::snprintf(dash, sizeof(dash),
-                                     "%-8s %6.3f GPS | graphs %-7llu sol %-4llu sub %-4llu "
-                                     "acc %-4llu rej %-4llu ovl %-6llu fail %-4llu | ",
-                                     gps > 0 ? "mining" : "idle", gps,
-                                     (unsigned long long)attempts,
-                                     (unsigned long long)shared.solutions.load(),
-                                     (unsigned long long)shared.submitted.load(),
-                                     (unsigned long long)s.accepted,
-                                     (unsigned long long)s.rejected,
-                                     (unsigned long long)shared.graphs_overloaded.load(),
-                                     (unsigned long long)shared.graphs_failed.load());
-            if (used < 0) used = 0;
-            if ((size_t)used < sizeof(dash)) {
-                if (telemetryOk) {
-                    std::snprintf(dash + used, sizeof(dash) - (size_t)used,
-                                  "%2.0f C %5.1f/%.0f W VRAM %4llu MiB fan %3.0f%% core %4.0f MHz",
-                                  t.temperature_c, t.power_w, t.power_limit_w,
-                                  (unsigned long long)(t.memory_used_bytes / (1024 * 1024)),
-                                  t.fan_percent, t.core_clock_mhz);
-                } else {
-                    std::snprintf(dash + used, sizeof(dash) - (size_t)used, "telemetry n/a");
-                }
-            }
+            std::snprintf(dash, sizeof(dash),
+                          "%-8s %6.3f G/s | graphs %llu | sol %llu | sub %llu | acc %llu | "
+                          "rej %llu | fail %llu | %2.0f C %5.1f/%.0f W fan %3.0f%% core %4.0f MHz "
+                          "VRAM %llu MiB",
+                          gps > 0 ? "mining" : "idle", gps, (unsigned long long)attempts,
+                          (unsigned long long)shared.solutions.load(),
+                          (unsigned long long)shared.submitted.load(),
+                          (unsigned long long)s.accepted, (unsigned long long)s.rejected,
+                          (unsigned long long)shared.graphs_failed.load(),
+                          telemetryOk ? t.temperature_c : 0.0, telemetryOk ? t.power_w : 0.0,
+                          telemetryOk ? t.power_limit_w : 0.0, telemetryOk ? t.fan_percent : 0.0,
+                          telemetryOk ? t.core_clock_mhz : 0.0,
+                          (unsigned long long)(telemetryOk ? t.memory_used_bytes / (1024 * 1024)
+                                                           : 0));
 
-            const std::string dashboard = dash;
             if (stdout_is_console()) {
-                if (g_dashboard_on_screen) std::printf("\x1b[1A\r\x1b[2K");
-                std::printf("%s\n", dashboard.c_str());
-                g_dashboard_on_screen = true;
+                // Two small tables plus a session line, the shape GPU miners usually use.
+                std::string gpuShort = devName;
+                const std::string vendor = "NVIDIA GeForce ";
+                if (gpuShort.rfind(vendor, 0) == 0) gpuShort = gpuShort.substr(vendor.size());
+
+                char cell[64];
+                std::vector<std::string> row1, row2;
+                row1.push_back(std::to_string(cfg.device));
+                row1.push_back(gpuShort);
+                std::snprintf(cell, sizeof(cell), "%.4f G/s", gps);
+                row1.push_back(cell);
+                std::snprintf(cell, sizeof(cell), "%llu / %llu",
+                              (unsigned long long)s.accepted, (unsigned long long)s.rejected);
+                row1.push_back(cell);
+                std::snprintf(cell, sizeof(cell), "%.1f W", telemetryOk ? t.power_w : 0.0);
+                row1.push_back(cell);
+                std::snprintf(cell, sizeof(cell), "%.3f mG/W",
+                              (telemetryOk && t.power_w > 0.0) ? gps * 1000.0 / t.power_w : 0.0);
+                row1.push_back(cell);
+
+                row2.push_back(std::to_string(cfg.device));
+                row2.push_back(gpuShort);
+                std::snprintf(cell, sizeof(cell), "%.0f C", telemetryOk ? t.temperature_c : 0.0);
+                row2.push_back(cell);
+                std::snprintf(cell, sizeof(cell), "%.0f %%", telemetryOk ? t.fan_percent : 0.0);
+                row2.push_back(cell);
+                std::snprintf(cell, sizeof(cell), "%.0f MHz",
+                              telemetryOk ? t.core_clock_mhz : 0.0);
+                row2.push_back(cell);
+                std::snprintf(cell, sizeof(cell), "%.0f MHz",
+                              telemetryOk ? t.memory_clock_mhz : 0.0);
+                row2.push_back(cell);
+                std::snprintf(cell, sizeof(cell), "%llu / %llu MiB",
+                              (unsigned long long)(telemetryOk ? t.memory_used_bytes / (1024 * 1024)
+                                                               : 0),
+                              (unsigned long long)(vram / (1024 * 1024)));
+                row2.push_back(cell);
+
+                std::string block =
+                    render_table({"ID", "GPU", "Speed", "Shares a/r", "Power", "Efficiency"},
+                                 {row1}) +
+                    render_table({"ID", "GPU", "Temp", "Fan", "Core", "Mem", "VRAM"}, {row2});
+
+                const int ups = (int)seconds_since(processStart);
+                std::snprintf(dash, sizeof(dash),
+                              "Pool %s:%u | uptime %dd %02d:%02d:%02d | graphs %llu | "
+                              "energy %.3f kWh",
+                              cfg.pools[0].host.c_str(), (unsigned)cfg.pools[0].port,
+                              ups / 86400, (ups / 3600) % 24, (ups / 60) % 60, ups % 60,
+                              (unsigned long long)attempts, energyKwh);
+                block += std::string(dash) + "\n";
+
+                dashboard_clear();
+                std::printf("%s", block.c_str());
+                g_dashboard_lines = (int)std::count(block.begin(), block.end(), '\n');
+                std::fflush(stdout);
             } else {
-                std::printf("[%s] %s\n", timestamp_str().c_str(), dashboard.c_str());
+                std::printf("[%s] %s\n", timestamp_str().c_str(), dash);
+                std::fflush(stdout);
             }
-            std::fflush(stdout);
-            log_sink_write("[" + timestamp_str() + "] " + dashboard);
+            log_sink_write("[" + timestamp_str() + "] " + dash);
         }
     }
 
