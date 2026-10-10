@@ -359,6 +359,7 @@ void info(const std::string& label, const std::string& value) {
 // so every line printed to the console is written here as well.
 std::FILE* g_log_sink = nullptr;
 bool g_stratum_debug = false;   // when false, raw pool messages are dropped from the output
+unsigned long g_reconnects = 0; // pool-initiated closes, counted instead of logged
 
 void log_sink_open(const std::string& path) {
     if (path.empty()) return;
@@ -444,6 +445,16 @@ void log_line(const std::string& s) {
     //   * the job height / job id lines, which are bookkeeping for the miner and the pool.
     // Both are one flag away, because they were essential while the protocol was being
     // reverse-engineered and will be again the next time a rejection has to be explained.
+    // The pool closes the session on its own timer. Measured on 2miners: 23 closes over a session,
+    // median interval 120 s, and 12 of 23 landing in a 10-second window, which is a timer rather
+    // than a failing link. The miner reconnects immediately and keeps mining, so a line per event
+    // is noise - but the RATE is worth watching, because a change in it would matter. Counted and
+    // reported in the session footer instead of logged per event; --stratum-debug restores the
+    // individual lines.
+    if (s.find("closed by the peer") != std::string::npos) {
+        ++g_reconnects;
+        if (!g_stratum_debug) return;
+    }
     if (!g_stratum_debug && (s.find("recv:") != std::string::npos ||
                              s.find("job height=") != std::string::npos)) {
         return;
@@ -1357,10 +1368,10 @@ int main(int argc, char** argv) {
                 const int ups = (int)seconds_since(processStart);
                 std::snprintf(dash, sizeof(dash),
                               "Pool %s:%u | uptime %dd %02d:%02d:%02d | graphs %llu | "
-                              "energy %.3f kWh",
+                              "energy %.3f kWh | reconnects %lu",
                               cfg.pools[0].host.c_str(), (unsigned)cfg.pools[0].port,
                               ups / 86400, (ups / 3600) % 24, (ups / 60) % 60, ups % 60,
-                              (unsigned long long)attempts, energyKwh);
+                              (unsigned long long)attempts, energyKwh, g_reconnects);
                 block += col(kColDim, std::string(dash)) + "\n";
 
                 dashboard_clear();
