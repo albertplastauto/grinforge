@@ -359,7 +359,6 @@ void info(const std::string& label, const std::string& value) {
 // so every line printed to the console is written here as well.
 std::FILE* g_log_sink = nullptr;
 bool g_stratum_debug = false;   // when false, raw pool messages are dropped from the output
-unsigned long g_reconnects = 0; // pool-initiated closes, counted instead of logged
 
 void log_sink_open(const std::string& path) {
     if (path.empty()) return;
@@ -457,10 +456,11 @@ void log_line(const std::string& s) {
     // session were answered "accepted", so submitting does not close the session; and the single
     // close we caught arrived 80 ms after a submit, which is coincidence-level evidence rather
     // than a mechanism.
-    if (s.find("closed by the peer") != std::string::npos) {
-        ++g_reconnects;
-        if (!g_stratum_debug) return;
-    }
+    // The number comes from the stratum client, which increments it on every path that leads to a
+    // reconnect. An earlier version of this counter matched the text of one particular failure
+    // message, so it could only ever under-count: reconnects caused by a failed send or by a
+    // connect error never mentioned that string.
+    if (!g_stratum_debug && s.find("closed by the peer") != std::string::npos) return;
     if (!g_stratum_debug && (s.find("recv:") != std::string::npos ||
                              s.find("job height=") != std::string::npos ||
                              s.find("nonce space start:") != std::string::npos ||
@@ -1396,10 +1396,11 @@ int main(int argc, char** argv) {
                 const int ups = (int)seconds_since(processStart);
                 std::snprintf(dash, sizeof(dash),
                               "Pool %s:%u | uptime %dd %02d:%02d:%02d | graphs %llu | "
-                              "energy %.3f kWh | reconnects %lu",
+                              "energy %.3f kWh | reconnects %llu",
                               cfg.pools[0].host.c_str(), (unsigned)cfg.pools[0].port,
                               ups / 86400, (ups / 3600) % 24, (ups / 60) % 60, ups % 60,
-                              (unsigned long long)attempts, energyKwh, g_reconnects);
+                              (unsigned long long)attempts, energyKwh,
+                              (unsigned long long)s.reconnects);
                 block += std::string(dash) + "\n";
 
                 dashboard_clear();
