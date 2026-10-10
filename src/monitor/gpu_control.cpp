@@ -495,9 +495,12 @@ std::string lowercase(std::string text) {
 
 std::string system_error_text(DWORD code) {
     LPWSTR buffer = nullptr;
+    // English on purpose: LANG_NEUTRAL returns the OS display language, which would leak Russian
+    // (or any other locale) into output that is meant to be English everywhere. The numeric code
+    // is already the first half of the string, so it stays useful if FormatMessage fails.
     const DWORD length = FormatMessageW(
         FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-        nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), reinterpret_cast<LPWSTR>(&buffer), 0, nullptr);
+        nullptr, code, MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), reinterpret_cast<LPWSTR>(&buffer), 0, nullptr);
     std::string text = "win32 error " + std::to_string(code);
     if (length != 0 && buffer != nullptr) {
         std::wstring wide(buffer, length);

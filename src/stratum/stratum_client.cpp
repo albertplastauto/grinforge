@@ -397,9 +397,15 @@ bool is_connection_gone(int code) {
 std::string wsa_error_text(int code) {
     std::string text = "Winsock error " + std::to_string(code);
     char* buffer = nullptr;
+    // English on purpose, not LANG_NEUTRAL: neutral returns the OS display language, so on a
+    // Russian Windows the operator's log was getting
+    //   "Winsock error 10054 (Удаленный хост принудительно разорвал ...)"
+    // in a project that is otherwise entirely English and published internationally. If the
+    // English message table is not installed, FormatMessage fails and the numeric code stands on
+    // its own, which is why the line above is built from the code first.
     const DWORD length = ::FormatMessageA(
         FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
-        static_cast<DWORD>(code), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), reinterpret_cast<LPSTR>(&buffer), 0,
+        static_cast<DWORD>(code), MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US), reinterpret_cast<LPSTR>(&buffer), 0,
         nullptr);
     if (length != 0 && buffer != nullptr) {
         std::string detail(buffer, length);
