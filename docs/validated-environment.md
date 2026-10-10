@@ -9,7 +9,7 @@ share are tied to the environment: if the driver, CUDA, or compiler changes, the
 | Component | Version |
 |---|---|
 | GPU | NVIDIA GeForce RTX 4060 Ti, 8188 MiB, compute capability **8.9** (Ada), VBIOS 95.06.26.00.52 |
-| **NVIDIA driver** | **617.14** (CUDA UMD 13.4) |
+| **NVIDIA driver** | **617.42** (CUDA UMD 13.4) — updated and re-verified 2026-10-10; 617.14 was the previous verified base |
 | CUDA Toolkit | **13.4**, V13.4.59 (`nvcc`) |
 | Compiler | MSVC **14.51.36231**, `cl` 19.51.36257 (Visual Studio 18 Community 2026) |
 | Windows SDK | 10.0.26100.0 |
@@ -106,3 +106,36 @@ cured by a new driver — that is its own C32 support.
 If an update does become necessary (for example, because of security fixes), proceed
 as follows: record the current version (617.14), keep the installer for rollback, update,
 reboot, run the set of commands above, and compare the hashrate against the table.
+
+## 617.42: the update was taken, and re-verified (2026-10-10)
+
+The decision recorded above was to stay on 617.14. On 2026-10-10 the operator took the update
+anyway, after a system restore point, a fresh backup and a written pre-update baseline. The
+paragraph above is left in place on purpose: it was the right call with the information available
+at the time, and this section supersedes it.
+
+Result: **no regression, and the numbers came out bit-identical where they must be.**
+
+| Check | Baseline on 617.14 | On 617.42 |
+|---|---|---|
+| `selftest` | passed | passed |
+| device-vs-host siphash | agree (0/64) | agree (0/64) |
+| C20/P6 window | 5 of 6 verified | 5 of 6 verified |
+| C29 nonce 85 | 428,633 edges, `raw_cycles=1 verify=OK lz=3` | **428,633 edges, `raw_cycles=1 verify=OK lz=3`** |
+| C29 nonces 86 / 87 | 416,590 / 429,144 edges | **416,590 / 429,144 edges** |
+| C32 edges | 1,026,168 | **1,026,168** |
+| C32 trim / total | 15,917 ms / 17.34 s | 15,853 ms / 17.17 s |
+
+Identical edge counts on three separate configurations, and the previously verified solution
+still reproduces, so the driver changed neither the generated code nor its behaviour. The timing
+difference is inside run-to-run noise.
+
+Two operational notes from the same event, both of which had been fixed earlier the same day and
+were confirmed here rather than assumed:
+
+* the clock guard re-applied the 2500 MHz cap by itself after the reboot, because its state is
+  tied to the boot time and a state recorded before a reboot is no longer trusted (version
+  0.3.1). Without that fix the miner would have run at 2790 MHz and nobody would have noticed;
+* the fixed 40% fan setting survived the driver update, which is not something to rely on - check
+  it after any update.
+
