@@ -398,8 +398,8 @@ std::string wsa_error_text(int code) {
     std::string text = "Winsock error " + std::to_string(code);
     char* buffer = nullptr;
     // English on purpose, not LANG_NEUTRAL: neutral returns the OS display language, so on a
-    // Russian Windows the operator's log was getting
-    //   "Winsock error 10054 (Удаленный хост принудительно разорвал ...)"
+    // Russian Windows the operator's log was getting the system's Russian rendering of
+    // "an existing connection was forcibly closed by the remote host" appended to the code -
     // in a project that is otherwise entirely English and published internationally. If the
     // English message table is not installed, FormatMessage fails and the numeric code stands on
     // its own, which is why the line above is built from the code first.
