@@ -346,6 +346,15 @@ std::string col(const char* code, const std::string& text) {
     return std::string(code) + text + "\x1b[0m";
 }
 
+// One label column for every informational line. Mixing styles is what made the opening output
+// look ragged: a padded label here, a single space there, a two-space sub-entry elsewhere, so
+// the values started at three different columns. Everything informational now goes through this,
+// and sub-entries are just longer labels rather than extra indentation. The width is chosen for
+// the longest label in use ("Temperature limit:"), plus a space.
+void info(const std::string& label, const std::string& value) {
+    std::printf("%-21s %s\n", (label + ":").c_str(), value.c_str());
+}
+
 // Optional append-only log file. Running with a visible window must not cost us the log,
 // so every line printed to the console is written here as well.
 std::FILE* g_log_sink = nullptr;
@@ -524,8 +533,8 @@ int main(int argc, char** argv) {
         std::string walletAddress, workerName;
         split_login(cfg.user, walletAddress, workerName);
 
-        std::printf("mining to address: %s\n", walletAddress.c_str());
-        if (!workerName.empty()) std::printf("worker name:       %s\n", workerName.c_str());
+        info("Mining to address", walletAddress);
+        if (!workerName.empty()) info("Worker name", workerName);
         if (!looks_like_grin_address(walletAddress)) {
             std::printf("WARNING: this does not look like a GRIN mainnet address "
                         "(expected \"grin1\" + 58 chars = 63 total).\n"
@@ -550,14 +559,11 @@ int main(int argc, char** argv) {
                     "actually intend to mine to via --allow-address, or drop the allowlist.\n");
                 return 2;
             }
-            std::printf("wallet guard:      OK, address matches the allowlist (%zu entr%s)\n",
-                        cfg.allowed_addresses.size(),
-                        cfg.allowed_addresses.size() == 1 ? "y" : "ies");
+            info("Wallet guard", "OK, address matches the allowlist (" +
+                                     std::to_string(cfg.allowed_addresses.size()) + " entr" +
+                                     (cfg.allowed_addresses.size() == 1 ? "y)" : "ies)"));
         } else {
-            std::printf("wallet guard:      no allowlist set; add\n"
-                        "                     --allow-address %s\n"
-                        "                   to make a silent wallet change impossible.\n",
-                        walletAddress.c_str());
+            info("Wallet guard", "no allowlist set; add --allow-address " + walletAddress);
         }
     }
 
@@ -572,27 +578,24 @@ int main(int argc, char** argv) {
     std::printf("%s\n", col(kColTitle, "|           GrinForge - GRIN Cuckatoo32 GPU miner              |").c_str());
     std::printf("%s\n", col(kColGood,  "|                0 % developer fee, MIT licensed               |").c_str());
     std::printf("%s\n", col(kColTitle, "+--------------------------------------------------------------+").c_str());
-    std::printf("Algorithm:         Cuckatoo32 lean (CUDA)\n");
-    std::printf("DevFee:            0 %%\n");
-    std::printf("Server:\n");
+    info("Algorithm", "Cuckatoo32 lean (CUDA)");
+    info("DevFee", "0 %");
     for (size_t i = 0; i < cfg.pools.size(); ++i) {
-        std::printf("  %-15s %s:%u%s\n", i == 0 ? "host:" : "failover:",
-                    cfg.pools[i].host.c_str(), (unsigned)cfg.pools[i].port,
-                    i == 0 ? "" : "");
+        info(i == 0 ? "Server" : "Server (failover)",
+             cfg.pools[i].host + ":" + std::to_string((unsigned)cfg.pools[i].port));
     }
-    std::printf("  %-15s %s\n", "user:", cfg.user.empty() ? "(none)" : cfg.user.c_str());
-    std::printf("  %-15s %s\n", "password:", cfg.pass.c_str());
-    std::printf("Wallet guard:      %s\n",
-                cfg.allowed_addresses.empty() ? "not set (add --allow-address)"
-                                              : "enforced (address must match the allowlist)");
-    std::printf("Solver:            ntrims=%u blocks=%u tpb=%u\n", cfg.ntrims, cfg.blocks,
-                cfg.tpb);
-    std::printf("Temperature limit: %.0f C\n", cfg.temp_limit_c);
-    std::printf("HTTP API:          %s\n",
-                cfg.api_port == 0 ? "off"
-                                  : ("http://127.0.0.1:" + std::to_string(cfg.api_port) +
-                                     "/stat")
-                                        .c_str());
+    info("User", cfg.user.empty() ? "(none)" : cfg.user);
+    info("Password", cfg.pass);
+    info("Wallet guard", cfg.allowed_addresses.empty()
+                            ? "not set (add --allow-address)"
+                            : "enforced (address must match the allowlist)");
+    info("Solver", "ntrims=" + std::to_string(cfg.ntrims) +
+                       " blocks=" + std::to_string(cfg.blocks) +
+                       " tpb=" + std::to_string(cfg.tpb));
+    info("Temperature limit", std::to_string((int)cfg.temp_limit_c) + " C");
+    info("HTTP API", cfg.api_port == 0
+                        ? "off"
+                        : "http://127.0.0.1:" + std::to_string(cfg.api_port) + "/stat");
     std::printf("--------------------------------------------------------------\n");
     // The banner above goes to the console; record the same essentials in the log file, which
     // otherwise would show sessions without saying what they were mining or with which limits.
@@ -609,17 +612,18 @@ int main(int argc, char** argv) {
     uint64_t vram = 0;
     int cmaj = 0, cmin = 0;
     const int deviceCount = grin::LeanSolver::device_count();
-    std::printf("CUDA devices: %d\n", deviceCount);
-    if (deviceCount == 0) {
-        std::printf("no CUDA device found (is the NVIDIA driver installed?)\n");
-        return 1;
-    }
-    for (int i = 0; i < deviceCount; ++i) {
-        if (grin::LeanSolver::device_info(i, devName, vram, cmaj, cmin)) {
-            std::printf("  [%d] %s, %llu MiB, sm_%d%d\n", i, devName.c_str(),
-                        (unsigned long long)(vram / (1024 * 1024)), cmaj, cmin);
+        info("CUDA devices", std::to_string(deviceCount));
+        if (deviceCount == 0) {
+            std::printf("no CUDA device found (is the NVIDIA driver installed?)\n");
+            return 1;
         }
-    }
+        for (int i = 0; i < deviceCount; ++i) {
+            if (grin::LeanSolver::device_info(i, devName, vram, cmaj, cmin)) {
+                info("GPU " + std::to_string(i),
+                     devName + ", " + std::to_string(vram / (1024 * 1024)) + " MiB, sm_" +
+                         std::to_string(cmaj) + std::to_string(cmin));
+            }
+        }
     if (cfg.device < 0 || cfg.device >= deviceCount) {
         std::printf("device index %d is out of range\n", cfg.device);
         return 2;
@@ -629,21 +633,20 @@ int main(int argc, char** argv) {
     // ---- telemetry and control -------------------------------------------
     std::string error;
     if (grin::Telemetry::init(error)) {
-        std::printf("telemetry backend: %s, %zu device(s)\n", grin::Telemetry::backend_name(),
-                    grin::Telemetry::device_count());
+        info("Telemetry", std::string(grin::Telemetry::backend_name()) + ", " +
+                              std::to_string(grin::Telemetry::device_count()) + " device(s)");
         // Bind this run to the driver it is measured on: every number in the project is
         // tied to a specific driver (docs/validated-environment.md), so the log should
         // state it instead of leaving it to documentation.
         const std::string driverVersion = grin::Telemetry::driver_version();
-        std::printf("nvidia driver:     %s\n",
-                    driverVersion.empty() ? "unknown" : driverVersion.c_str());
+        info("NVIDIA driver", driverVersion.empty() ? "unknown" : driverVersion);
     } else {
         std::printf("telemetry unavailable: %s (mining continues without monitoring)\n",
                     error.c_str());
     }
 
     if (grin::GpuControl::init((unsigned)cfg.device, error)) {
-        std::printf("gpu control backend: %s\n", grin::GpuControl::backend_name());
+        info("GPU control", grin::GpuControl::backend_name());
         if (cfg.apply_power_limit) {
             grin::PowerLimitRange range;
             if (grin::GpuControl::query_power_limit_range(range, error)) {
@@ -724,9 +727,12 @@ int main(int argc, char** argv) {
     scfg.ntrims = cfg.ntrims;
     scfg.blocks = cfg.blocks;
     scfg.tpb = cfg.tpb;
-    std::printf("solver: ntrims=%u blocks=%u tpb=%u, device image ~%llu MiB\n", scfg.ntrims,
-                scfg.blocks, scfg.tpb,
-                (unsigned long long)(grin::LeanSolver::device_bytes_for(scfg) / (1024 * 1024)));
+    info("Solver image", "ntrims=" + std::to_string(scfg.ntrims) +
+                             " blocks=" + std::to_string(scfg.blocks) +
+                             " tpb=" + std::to_string(scfg.tpb) + ", device image ~" +
+                             std::to_string(grin::LeanSolver::device_bytes_for(scfg) /
+                                            (1024 * 1024)) +
+                             " MiB");
 
     auto solver = std::make_unique<grin::LeanSolver>(scfg);
 
@@ -902,9 +908,10 @@ int main(int argc, char** argv) {
         std::printf("--user <wallet.worker> is required (or --bench-seconds for a dry run)\n");
         return 2;
     }
-    std::printf("pools:\n");
-    for (const auto& p : cfg.pools) std::printf("  %s:%u\n", p.host.c_str(), p.port);
-    std::printf("wallet/worker: %s\n\n", cfg.user.c_str());
+    // The banner above already lists the servers, the user and the solver parameters; this block
+    // repeated them in a different style, which is exactly what made the opening output look
+    // ragged.
+    std::printf("\n");
 
     Shared shared;
     shared.last_progress_unix_ms.store(now_unix_ms());
