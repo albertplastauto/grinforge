@@ -286,3 +286,35 @@ at a loss of $0.13 at $0.13/kWh. The project makes sense as an engineering effor
 measurement bench, and as a bid for Tromp's bounty ($10,000 for an open
 C32 solver at 1 gps within ≤100·x W): a 4060 Ti at ~100 W should deliver ~1 GPS,
 that is, the target is the ceiling from section 3, point 2.
+
+## 9. Fan behaviour on this card, and why a fixed floor wins
+
+The card's own fan curve stops the fan entirely once it considers the GPU cool enough, so under
+a steady mining load it cycled between 0% and 31%. The result was a temperature sawtooth rather
+than a temperature:
+
+| | Card's own curve | Fixed 40% (set externally) |
+|---|---|---|
+| Temperature | 44-62 C | **41-44 C** |
+| Spread | 18 C | **3 C** |
+| Peak | 62 C | **44 C** |
+| Fan | 0 <-> 31%, starting and stopping | steady 40% |
+| Power | ~60 W | **54.7 W** |
+
+Two things are worth taking from this. The peak drops by 18 C, and the power drops slightly with
+it, because a cooler die leaks less. But the more interesting point is that the card is **not**
+misbehaving: 62 C is far below its 83 C target, and stopping the fan is what zero-RPM modes are
+for. The argument for a floor is wear rather than safety - a steady workload driven by a
+stop-start fan thermally cycles the die and the solder joints many times a day, and repeated
+thermal expansion is a real wear mechanism. Steady rotation under steady load is kinder than
+dynamic control chasing a threshold.
+
+This has to be set **externally** (NVIDIA app, MSI Afterburner, or whatever the vendor provides).
+Neither this miner nor `nvidia-smi` can do it: NVAPI returns NOT_SUPPORTED for cooler settings on
+consumer GeForce cards, which is why `--fan` refuses with an explicit reason instead of
+pretending to work. The miner reads the fan speed but never writes it, so it cannot fight
+whatever the operator configures.
+
+The same reasoning is why the clock guard in section 6 holds a fixed ceiling instead of letting
+the boost chase its own headroom.
+
