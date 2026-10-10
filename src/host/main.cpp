@@ -401,17 +401,12 @@ std::string render_table(const std::vector<std::string>& header,
         }
         return s + "\n";
     };
-    std::string out = bar();
-    if (g_color) {
-        out += row(header, nullptr);   // header styling handled by the caller's colour choice
-    } else {
-        out += row(header, nullptr);
-    }
+    std::string out = row(header, nullptr);
     out += bar();
     for (size_t i = 0; i < rows.size(); ++i) {
         out += row(rows[i], i < colors.size() ? &colors[i] : nullptr);
     }
-    return out + bar();
+    return out;
 }
 
 // Number of lines currently occupied by the console dashboard, so the next repaint can erase
