@@ -312,6 +312,32 @@ bool stdout_is_console() {
     return h != nullptr && h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode) != 0;
 }
 
+// ANSI colours are used only on a real console, and only after that console has been switched
+// into virtual-terminal mode: without the switch Windows prints the escape sequences literally,
+// which makes a coloured dashboard worse than a plain one, not better.
+bool g_color = false;
+
+bool enable_console_colors() {
+    const HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h == nullptr || h == INVALID_HANDLE_VALUE) return false;
+    DWORD mode = 0;
+    if (GetConsoleMode(h, &mode) == 0) return false;
+    if (SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) == 0) return false;
+    return true;
+}
+
+const char* kColTitle = "\x1b[1;36m";   // bold cyan
+const char* kColLabel = "\x1b[36m";     // cyan
+const char* kColGood  = "\x1b[32m";     // green
+const char* kColWarn  = "\x1b[33m";     // yellow
+const char* kColBad   = "\x1b[31m";     // red
+const char* kColDim   = "\x1b[2m";      // dim
+
+std::string col(const char* code, const std::string& text) {
+    if (!g_color) return text;
+    return std::string(code) + text + "\x1b[0m";
+}
+
 // Optional append-only log file. Running with a visible window must not cost us the log,
 // so every line printed to the console is written here as well.
 std::FILE* g_log_sink = nullptr;
@@ -334,8 +360,13 @@ void log_sink_write(const std::string& line) {
 
 // Render a box table whose bars are derived from the cell widths, so the output cannot come
 // out ragged the way hand-written padding eventually does.
+//
+// Colours are applied per cell, and the widths are always measured on the PLAIN text: wrapping
+// a padded cell in escape codes would otherwise make every coloured column one padding step too
+// wide, which is exactly how coloured tables end up looking worse than plain ones.
 std::string render_table(const std::vector<std::string>& header,
-                         const std::vector<std::vector<std::string>>& rows) {
+                         const std::vector<std::vector<std::string>>& rows,
+                         const std::vector<std::vector<const char*>>& colors = {}) {
     std::vector<size_t> w(header.size());
     for (size_t i = 0; i < header.size(); ++i) w[i] = header[i].size();
     for (const auto& r : rows) {
@@ -348,16 +379,29 @@ std::string render_table(const std::vector<std::string>& header,
         for (size_t i = 0; i < w.size(); ++i) s += std::string(w[i] + 2, '-') + "+";
         return s + "\n";
     };
-    const auto row = [&](const std::vector<std::string>& r) {
+    const auto row = [&](const std::vector<std::string>& r, const std::vector<const char*>* cs) {
         std::string s = "|";
         for (size_t i = 0; i < w.size(); ++i) {
             const std::string cell = i < r.size() ? r[i] : std::string();
-            s += " " + cell + std::string(w[i] - cell.size(), ' ') + " |";
+            const std::string pad(w[i] - cell.size(), ' ');
+            const char* c = (cs != nullptr && i < cs->size()) ? (*cs)[i] : nullptr;
+            s += " ";
+            if (c != nullptr && g_color) s += std::string(c) + cell + "\x1b[0m" + pad;
+            else s += cell + pad;
+            s += " |";
         }
         return s + "\n";
     };
-    std::string out = bar() + row(header) + bar();
-    for (const auto& r : rows) out += row(r);
+    std::string out = bar();
+    if (g_color) {
+        out += row(header, nullptr);   // header styling handled by the caller's colour choice
+    } else {
+        out += row(header, nullptr);
+    }
+    out += bar();
+    for (size_t i = 0; i < rows.size(); ++i) {
+        out += row(rows[i], i < colors.size() ? &colors[i] : nullptr);
+    }
     return out + bar();
 }
 
@@ -380,7 +424,19 @@ void log_line(const std::string& s) {
     // Erase the dashboard block first: otherwise a log line would be printed below it and the
     // next repaint would overwrite the log instead of the block.
     dashboard_clear();
-    std::printf("%s\n", line.c_str());
+    // Tint the events worth noticing, so a wall of stratum chatter does not hide the one line
+    // that matters.
+    const char* tint = nullptr;
+    if (s.find("FAILED") != std::string::npos || s.find("CUDA error") != std::string::npos ||
+        s.find("rejected") != std::string::npos) {
+        tint = kColBad;
+    } else if (s.find("stale") != std::string::npos || s.find("WARNING") != std::string::npos) {
+        tint = kColWarn;
+    } else if (s.find("accepted") != std::string::npos) {
+        tint = kColGood;
+    }
+    if (tint != nullptr && g_color) std::printf("%s\n", col(tint, line).c_str());
+    else std::printf("%s\n", line.c_str());
     std::fflush(stdout);
     log_sink_write(line);
 }
@@ -492,14 +548,15 @@ int main(int argc, char** argv) {
     }
 
     log_sink_open(cfg.log_file);
+    g_color = enable_console_colors();
 
     // Startup banner, presented the way GPU miners usually are: a configuration block first,
     // then a timestamped log. Everything here is known before the solver is created, so a
     // reader can see at a glance what is mined, to which wallet, and under which limits.
-    std::printf("+--------------------------------------------------------------+\n");
-    std::printf("|           GrinForge - GRIN Cuckatoo32 GPU miner              |\n");
-    std::printf("|                0 %% developer fee, MIT licensed              |\n");
-    std::printf("+--------------------------------------------------------------+\n");
+    std::printf("%s\n", col(kColTitle, "+--------------------------------------------------------------+").c_str());
+    std::printf("%s\n", col(kColTitle, "|           GrinForge - GRIN Cuckatoo32 GPU miner              |").c_str());
+    std::printf("%s\n", col(kColGood,  "|                0 % developer fee, MIT licensed               |").c_str());
+    std::printf("%s\n", col(kColTitle, "+--------------------------------------------------------------+").c_str());
     std::printf("Algorithm:         Cuckatoo32 lean (CUDA)\n");
     std::printf("DevFee:            0 %%\n");
     std::printf("Server:\n");
@@ -1233,10 +1290,30 @@ int main(int argc, char** argv) {
                               (unsigned long long)(vram / (1024 * 1024)));
                 row2.push_back(cell);
 
+                // Colour carries meaning rather than decoration: green is healthy, yellow wants
+                // a look, red needs action. Only the data cells are coloured; the frame and
+                // labels stay quiet so the eye lands on the numbers.
+                std::vector<std::vector<const char*>> colors1(
+                    1, std::vector<const char*>(row1.size(), nullptr));
+                std::vector<std::vector<const char*>> colors2(
+                    1, std::vector<const char*>(row2.size(), nullptr));
+                colors1[0][1] = kColLabel;                                     // GPU name
+                colors1[0][2] = (gps > 0.0) ? kColGood : kColWarn;             // speed
+                colors1[0][3] = (s.accepted >= s.rejected) ? kColGood : kColWarn;
+                colors1[0][5] = kColGood;                                     // efficiency
+                const double tempC = telemetryOk ? t.temperature_c : 0.0;
+                colors2[0][1] = kColLabel;
+                colors2[0][2] = (tempC >= cfg.temp_limit_c - 8.0) ? kColBad
+                               : (tempC >= 65.0)                 ? kColWarn
+                                                                 : kColGood;
+                colors2[0][5] = kColDim;
+                colors2[0][6] = kColDim;
+
                 std::string block =
                     render_table({"ID", "GPU", "Speed", "Shares a/r", "Power", "Efficiency"},
-                                 {row1}) +
-                    render_table({"ID", "GPU", "Temp", "Fan", "Core", "Mem", "VRAM"}, {row2});
+                                 {row1}, colors1) +
+                    render_table({"ID", "GPU", "Temp", "Fan", "Core", "Mem", "VRAM"}, {row2},
+                                 colors2);
 
                 const int ups = (int)seconds_since(processStart);
                 std::snprintf(dash, sizeof(dash),
@@ -1245,7 +1322,7 @@ int main(int argc, char** argv) {
                               cfg.pools[0].host.c_str(), (unsigned)cfg.pools[0].port,
                               ups / 86400, (ups / 3600) % 24, (ups / 60) % 60, ups % 60,
                               (unsigned long long)attempts, energyKwh);
-                block += std::string(dash) + "\n";
+                block += col(kColDim, std::string(dash)) + "\n";
 
                 dashboard_clear();
                 std::printf("%s", block.c_str());
