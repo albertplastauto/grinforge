@@ -27,12 +27,26 @@ $logFile   = Join-Path $env:ProgramData 'grinforge-gpu-guard.log'
 $minerCount = @(Get-Process -Name 'grinforge' -ErrorAction SilentlyContinue).Count
 $want = if ($minerCount -gt 0) { 'capped' } else { 'unlocked' }
 
+# The driver forgets a clock lock on reboot, but the state file does not. Without tying the
+# state to the current boot the guard concludes "already capped" after every restart and never
+# re-applies the lock - which is exactly what happened on 2026-10-10: state said "capped" from
+# the previous evening, the machine rebooted, and the miner then ran at 2790 MHz instead of
+# 2490 for as long as nobody looked.
+#
+# Two earlier attempts at this identifier were wrong and both were caught by testing rather
+# than by reading: [math]::Floor on a DateTime silently produced 0, and
+# [Environment]::TickCount64 returned nothing at all in the task's language mode, which made
+# the identifier equal the CURRENT time - it then changed every minute, defeating the
+# "nothing to do" shortcut entirely. LastBootUpTime is the honest source for this.
+$bootId = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('yyyyMMddHHmm')
+$wantState = "$want|$bootId"
+
 $have = ''
 if (Test-Path $stateFile) { $have = (Get-Content -Path $stateFile -Raw).Trim() }
 
 # Nothing to do: do not touch the GPU on every tick, so a manual profile set by the
 # operator is left alone until the mining state actually flips.
-if ($want -eq $have) { exit 0 }
+if ($wantState -eq $have) { exit 0 }
 
 $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 if ($want -eq 'capped') {
@@ -42,5 +56,5 @@ if ($want -eq 'capped') {
     $out = & $nvidiaSmi --reset-gpu-clocks 2>&1
     "$stamp  miner stopped  -> resetting clocks (full boost for games/video)  | $out" | Add-Content -Path $logFile
 }
-Set-Content -Path $stateFile -Value $want
+Set-Content -Path $stateFile -Value $wantState
 exit 0

@@ -4,6 +4,26 @@ All notable changes to GrinForge. This project is young; the format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the versioning is
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-10-10
+
+### Fixed
+
+- **The clock cap was lost after every reboot.** The guard keeps the 2500 MHz cap applied
+  while the miner runs, and decides whether to act by comparing the desired state with what it
+  last did. The state file survives a reboot; the driver's clock lock does not. So after a
+  restart the guard concluded "already capped" and never re-applied it - observed on
+  2026-10-10, when the miner ran at 2790 MHz and 73 W instead of 2490 MHz for as long as nobody
+  looked. The state is now tied to the system's boot time, so a state recorded before the
+  current boot is never trusted.
+
+  Two attempts at that boot identifier were wrong and both were caught by testing rather than
+  by reading the code: `[math]::Floor` on a `DateTime` silently produced `0` (the identifier
+  never changed, so the bug stayed exactly as it was), and `[Environment]::TickCount64`
+  returned nothing in the scheduled task's language mode, which made the identifier equal the
+  *current* time and therefore change every minute, defeating the "nothing to do" shortcut.
+  `LastBootUpTime` is now used, and verified to match the real boot time exactly and to be
+  stable across consecutive runs.
+
 ## [0.3.0] - 2026-10-09
 
 A performance release whose gain is measured and verified, plus a long-run test that has now
@@ -161,6 +181,7 @@ documentation says so plainly.
 - Mining GRIN on a GPU is not competitive with ASICs. This project is about a correct,
   auditable, fee-free implementation.
 
+[0.3.1]: https://github.com/albertplastauto/grinforge/releases/tag/v0.3.1
 [0.3.0]: https://github.com/albertplastauto/grinforge/releases/tag/v0.3.0
 [0.2.0]: https://github.com/albertplastauto/grinforge/releases/tag/v0.2.0
 [0.1.0]: https://github.com/albertplastauto/grinforge/releases/tag/v0.1.0
