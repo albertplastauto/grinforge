@@ -98,6 +98,7 @@ struct Config {
     std::string bench_pre_pow_file;
     double   tune_seconds = 0.0;            // >0 = sweep GPU profiles and measure each
     double   report_seconds = 5.0;
+    std::string log_file;                   // optional append-only copy of all output
 
     uint16_t api_port = 4068;               // 0 disables the HTTP API
     bool     api_bind_all = false;          // expose the API to the LAN
@@ -150,6 +151,8 @@ void usage() {
         "                                print how to keep it across reboots (needs elevation)\n"
         "  --fan <percent>               fixed fan speed (0 = restore automatic)\n"
         "  --report <seconds>            dashboard interval (default 5)\n"
+        "  --log-file <path>             also append all console output to this file, so a\n"
+        "                                visible window still leaves a log behind\n"
         "  --api-port <port>             HTTP monitoring API on 127.0.0.1 (default 4068, 0 = off)\n"
         "  --api-bind-all                expose the API on all interfaces (not just loopback)\n"
         "  --bench-seconds <s>           run the solver without a pool for s seconds\n"
@@ -190,6 +193,7 @@ void apply_setting(Config& c, const std::string& key, const std::string& value) 
     else if (key == "install-gpu-profile") c.install_gpu_profile_mhz = (int)num();
     else if (key == "fan") c.fan_percent = (int)num();
     else if (key == "report") c.report_seconds = std::strtod(value.c_str(), nullptr);
+    else if (key == "log-file") c.log_file = value;
     else if (key == "api-port") c.api_port = (uint16_t)num();
     else if (key == "api-bind-all") c.api_bind_all = (num() != 0);
     else if (key == "bench-seconds") c.bench_seconds = std::strtod(value.c_str(), nullptr);
@@ -250,6 +254,7 @@ bool parse_args(Config& c, int argc, char** argv) {
         else if (a == "--install-gpu-profile") c.install_gpu_profile_mhz = std::atoi(next("--install-gpu-profile"));
         else if (a == "--fan") c.fan_percent = std::atoi(next("--fan"));
         else if (a == "--report") c.report_seconds = std::strtod(next("--report"), nullptr);
+        else if (a == "--log-file") c.log_file = next("--log-file");
         else if (a == "--api-port") c.api_port = (uint16_t)std::strtoul(next("--api-port"), nullptr, 10);
         else if (a == "--api-bind-all") c.api_bind_all = true;
         else if (a == "--bench-seconds") c.bench_seconds = std::strtod(next("--bench-seconds"), nullptr);
@@ -295,12 +300,50 @@ std::string timestamp_str() {
     return std::string(buf);
 }
 
+// ---------------------------------------------------------------------------
+// Console output
+// ---------------------------------------------------------------------------
+
+// True when stdout is an interactive console rather than a redirected file. The dashboard
+// only repaints in place on a console: a log file must stay line-oriented and greppable.
+bool stdout_is_console() {
+    const HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    return h != nullptr && h != INVALID_HANDLE_VALUE && GetConsoleMode(h, &mode) != 0;
+}
+
+// Optional append-only log file. Running with a visible window must not cost us the log,
+// so every line printed to the console is written here as well.
+std::FILE* g_log_sink = nullptr;
+bool       g_dashboard_on_screen = false;   // true while the dashboard is the bottom line
+
+void log_sink_open(const std::string& path) {
+    if (path.empty()) return;
+    g_log_sink = std::fopen(path.c_str(), "a");
+    if (g_log_sink != nullptr) {
+        std::fprintf(g_log_sink, "--- GrinForge session started %s ---\n", timestamp_str().c_str());
+        std::fflush(g_log_sink);
+    }
+}
+
+void log_sink_write(const std::string& line) {
+    if (g_log_sink == nullptr) return;
+    std::fputs(line.c_str(), g_log_sink);
+    std::fputc('\n', g_log_sink);
+    std::fflush(g_log_sink);
+}
+
 void log_line(const std::string& s) {
     // Timestamps are not cosmetic here: the pool drops the connection every couple
     // of minutes and a share submitted just before a drop never gets a response, so
     // correlating submits with drops is the only way to tell those apart.
-    std::printf("[%s] %s\n", timestamp_str().c_str(), s.c_str());
+    const std::string line = "[" + timestamp_str() + "] " + s;
+    std::printf("%s\n", line.c_str());
     std::fflush(stdout);
+    log_sink_write(line);
+    // Something else is now the bottom line, so the next dashboard must not try to
+    // overwrite it.
+    g_dashboard_on_screen = false;
 }
 
 // Pull a 238-byte pre_pow out of a captured stratum line or a bare hex string.
@@ -408,6 +451,8 @@ int main(int argc, char** argv) {
                         walletAddress.c_str());
         }
     }
+
+    log_sink_open(cfg.log_file);
 
     std::printf("GrinForge - GRIN Cuckatoo32 miner (0%% dev fee)\n");
     std::printf("================================================\n");
@@ -1054,24 +1099,45 @@ int main(int argc, char** argv) {
             lastAttempts = attempts;
             const auto s = get_client()->stats();
 
-            std::printf("[%s] [%-8s] %6.3f GPS | graphs %-7llu sol %-4llu sub %-4llu "
-                        "acc %-4llu rej %-4llu ovl %-6llu fail %-4llu | ",
-                        timestamp_str().c_str(), gps > 0 ? "mining" : "idle", gps,
-                        (unsigned long long)attempts,
-                        (unsigned long long)shared.solutions.load(),
-                        (unsigned long long)shared.submitted.load(),
-                        (unsigned long long)s.accepted, (unsigned long long)s.rejected,
-                        (unsigned long long)shared.graphs_overloaded.load(),
-                        (unsigned long long)shared.graphs_failed.load());
-            if (telemetryOk) {
-                std::printf("%2.0f C %5.1f/%.0f W VRAM %4llu MiB fan %3.0f%%\n",
-                            t.temperature_c, t.power_w, t.power_limit_w,
-                            (unsigned long long)(t.memory_used_bytes / (1024 * 1024)),
-                            t.fan_percent);
+            // Built as a string first so the same text can go to the console and to the log
+            // file. On a console the line is repainted in place instead of scrolling, which is
+            // what every other miner does; when redirected it stays line-oriented so the log
+            // remains greppable.
+            char dash[512];
+            int used = std::snprintf(dash, sizeof(dash),
+                                     "%-8s %6.3f GPS | graphs %-7llu sol %-4llu sub %-4llu "
+                                     "acc %-4llu rej %-4llu ovl %-6llu fail %-4llu | ",
+                                     gps > 0 ? "mining" : "idle", gps,
+                                     (unsigned long long)attempts,
+                                     (unsigned long long)shared.solutions.load(),
+                                     (unsigned long long)shared.submitted.load(),
+                                     (unsigned long long)s.accepted,
+                                     (unsigned long long)s.rejected,
+                                     (unsigned long long)shared.graphs_overloaded.load(),
+                                     (unsigned long long)shared.graphs_failed.load());
+            if (used < 0) used = 0;
+            if ((size_t)used < sizeof(dash)) {
+                if (telemetryOk) {
+                    std::snprintf(dash + used, sizeof(dash) - (size_t)used,
+                                  "%2.0f C %5.1f/%.0f W VRAM %4llu MiB fan %3.0f%% core %4.0f MHz",
+                                  t.temperature_c, t.power_w, t.power_limit_w,
+                                  (unsigned long long)(t.memory_used_bytes / (1024 * 1024)),
+                                  t.fan_percent, t.core_clock_mhz);
+                } else {
+                    std::snprintf(dash + used, sizeof(dash) - (size_t)used, "telemetry n/a");
+                }
+            }
+
+            const std::string dashboard = dash;
+            if (stdout_is_console()) {
+                if (g_dashboard_on_screen) std::printf("\x1b[1A\r\x1b[2K");
+                std::printf("%s\n", dashboard.c_str());
+                g_dashboard_on_screen = true;
             } else {
-                std::printf("telemetry n/a\n");
+                std::printf("[%s] %s\n", timestamp_str().c_str(), dashboard.c_str());
             }
             std::fflush(stdout);
+            log_sink_write("[" + timestamp_str() + "] " + dashboard);
         }
     }
 
