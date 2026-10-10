@@ -456,7 +456,9 @@ void log_line(const std::string& s) {
         if (!g_stratum_debug) return;
     }
     if (!g_stratum_debug && (s.find("recv:") != std::string::npos ||
-                             s.find("job height=") != std::string::npos)) {
+                             s.find("job height=") != std::string::npos ||
+                             s.find("nonce space start:") != std::string::npos ||
+                             s.find("http api listening") != std::string::npos)) {
         return;
     }
     // Timestamps are not cosmetic here: the pool drops the connection every couple
@@ -1200,6 +1202,10 @@ int main(int argc, char** argv) {
     auto lastReport = Clock::now();
     bool clockAdviceGiven = false;
     double energyKwh = 0.0;      // accumulated from measured power, shown in the dashboard
+    // Moving-average time constant for the displayed speed, and its state.
+    const double kSpeedTauSeconds = 300.0;
+    double speedAvg = 0.0;
+    bool speedAvgInit = false;
     uint64_t lastAttempts = 0;
     while (!g_stop.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -1258,18 +1264,31 @@ int main(int argc, char** argv) {
                          "with ~12% better GPS/W. To cap it (one time, needs elevation): "
                          "grinforge.exe --install-gpu-profile 2500, then "
                          "install-gpu-clock-task.bat to keep it across reboots.");
-            } else {
-                log_line("core clock is running at ~" + std::to_string((int)t.core_clock_mhz) +
-                         " MHz, which is at or below the measured optimum - the efficiency "
-                         "profile appears to be active.");
             }
+            // The benign branch is deliberately silent: the core clock is in the dashboard table,
+            // and a line announcing that everything is as configured is noise. The warning above
+            // stays, because a failed clock guard would otherwise be invisible.
         }
 
         if (seconds_since(lastReport) >= cfg.report_seconds) {
             lastReport = Clock::now();
             const uint64_t attempts = shared.attempts.load();
             const double interval = cfg.report_seconds;
-            const double gps = (double)(attempts - lastAttempts) / interval;
+            // Speed is a moving average, not the last interval. A single graph takes about 17 s
+            // and its GPS ranges from 0.029 to 0.058, so an instantaneous figure is mostly noise
+            // and nobody watching the miner can act on it. The time constant is five minutes, and
+            // the column header says the number is an average rather than a live reading.
+            const double elapsed = seconds_since(processStart);
+            const double instant = (double)(attempts - lastAttempts) / interval;
+            if (!speedAvgInit) {
+                // Seed from the session average so the number does not ramp up from zero.
+                speedAvg = elapsed > 0.0 ? (double)attempts / elapsed : instant;
+                speedAvgInit = true;
+            } else {
+                const double alpha = interval / (kSpeedTauSeconds + interval);
+                speedAvg += alpha * (instant - speedAvg);
+            }
+            const double gps = speedAvg;
             lastAttempts = attempts;
             energyKwh += (telemetryOk ? t.power_w : 0.0) / 1000.0 * interval / 3600.0;
             const auto s = get_client()->stats();
@@ -1341,21 +1360,24 @@ int main(int argc, char** argv) {
                     1, std::vector<const char*>(row2.size(), nullptr));
                 colors1[0][1] = kColLabel;                                     // GPU name
                 colors1[0][2] = (gps > 0.0) ? kColGood : kColWarn;             // speed
-                colors1[0][3] = (s.accepted > 0) ? kColGood : kColDim;         // accepted
-                colors1[0][4] = (s.rejected > 0) ? kColWarn : kColDim;         // rejected
+                colors1[0][3] = (s.accepted > 0) ? kColGood : nullptr;         // accepted
+                colors1[0][4] = (s.rejected > 0) ? kColBad : nullptr;          // rejected
                 colors1[0][6] = kColGood;                                     // efficiency
                 const double tempC = telemetryOk ? t.temperature_c : 0.0;
                 colors2[0][1] = kColLabel;
                 colors2[0][2] = (tempC >= cfg.temp_limit_c - 8.0) ? kColBad
                                : (tempC >= 65.0)                 ? kColWarn
                                                                  : kColGood;
-                colors2[0][5] = kColDim;
-                colors2[0][6] = kColDim;
+                // Memory clock and VRAM carry real information (the VRAM figure is what tells the
+                // operator the solver is actually resident), so they are plain white: grey on a
+                // dark console is harder to read, not quieter.
+                colors2[0][5] = nullptr;
+                colors2[0][6] = nullptr;
 
                 // Both tables are rendered against ONE width grid, and both have the same column
                 // count, so their frames line up exactly. Different column counts or independently
                 // sized columns left the right edges ragged, which is what the operator saw.
-                const std::vector<std::string> head1 = {"ID", "GPU",     "Speed", "Acc", "Rej",
+                const std::vector<std::string> head1 = {"ID", "GPU",     "Speed avg", "Acc", "Rej",
                                                        "Power", "Efficiency"};
                 const std::vector<std::string> head2 = {"ID", "GPU", "Temp", "Fan", "Core", "Mem",
                                                        "VRAM"};
@@ -1372,7 +1394,7 @@ int main(int argc, char** argv) {
                               cfg.pools[0].host.c_str(), (unsigned)cfg.pools[0].port,
                               ups / 86400, (ups / 3600) % 24, (ups / 60) % 60, ups % 60,
                               (unsigned long long)attempts, energyKwh, g_reconnects);
-                block += col(kColDim, std::string(dash)) + "\n";
+                block += std::string(dash) + "\n";
 
                 dashboard_clear();
                 std::printf("%s", block.c_str());
