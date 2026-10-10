@@ -154,9 +154,11 @@ void usage() {
         "  --report <seconds>            dashboard interval (default 5)\n"
         "  --log-file <path>             also append all console output to this file, so a\n"
         "                                visible window still leaves a log behind\n"
-        "  --stratum-debug               log every raw pool message. Off by default: those\n"
-        "                                lines carry a full 476-hex pre_pow per job and are\n"
-        "                                only useful when diagnosing the protocol itself\n"
+        "  --stratum-debug               also log service detail: every raw pool message (each\n"
+        "                                job carries a 476-hex pre_pow) and every job height /\n"
+        "                                job id line. Off by default - the operator does not need\n"
+        "                                it, and it is the first thing to turn on when a share\n"
+        "                                rejection has to be explained\n"
         "  --api-port <port>             HTTP monitoring API on 127.0.0.1 (default 4068, 0 = off)\n"
         "  --api-bind-all                expose the API on all interfaces (not just loopback)\n"
         "  --bench-seconds <s>           run the solver without a pool for s seconds\n"
@@ -424,11 +426,16 @@ void dashboard_clear() {
 }
 
 void log_line(const std::string& s) {
-    // Raw pool traffic is dropped unless explicitly asked for. Each job message carries the
-    // whole 476-hex pre_pow, so these lines dominate the log by size while telling the operator
-    // nothing the summarised "job height=... job_id=..." line does not; they earn their place
-    // only when the protocol itself is under investigation.
-    if (!g_stratum_debug && s.find("recv:") != std::string::npos) return;
+    // Service detail is dropped unless explicitly asked for. Two kinds:
+    //   * raw pool traffic, where each job message carries the whole 476-hex pre_pow, so the
+    //     lines dominate the log by size while saying nothing the summary does not;
+    //   * the job height / job id lines, which are bookkeeping for the miner and the pool.
+    // Both are one flag away, because they were essential while the protocol was being
+    // reverse-engineered and will be again the next time a rejection has to be explained.
+    if (!g_stratum_debug && (s.find("recv:") != std::string::npos ||
+                             s.find("job height=") != std::string::npos)) {
+        return;
+    }
     // Timestamps are not cosmetic here: the pool drops the connection every couple
     // of minutes and a share submitted just before a drop never gets a response, so
     // correlating submits with drops is the only way to tell those apart.
