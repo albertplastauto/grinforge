@@ -42,7 +42,7 @@ echo.
 
 "%ROOT%build\cmake\grinforge.exe" --pool grin.2miners.com:3030 ^
     --user %WALLET%.RIG1 --pass x --allow-address %WALLET% ^
-    --temp-limit 80 --api-port 4068 --report 3 ^
+    --temp-limit 80 --api-port 4068 --report 5 ^
     --log-file "%ROOT%logs\visible-%TODAY%.log"
 
 echo.

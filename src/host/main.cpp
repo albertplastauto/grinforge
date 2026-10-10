@@ -99,6 +99,7 @@ struct Config {
     double   tune_seconds = 0.0;            // >0 = sweep GPU profiles and measure each
     double   report_seconds = 5.0;
     std::string log_file;                   // optional append-only copy of all output
+    bool     stratum_debug = false;         // log raw pool protocol messages
 
     uint16_t api_port = 4068;               // 0 disables the HTTP API
     bool     api_bind_all = false;          // expose the API to the LAN
@@ -153,6 +154,9 @@ void usage() {
         "  --report <seconds>            dashboard interval (default 5)\n"
         "  --log-file <path>             also append all console output to this file, so a\n"
         "                                visible window still leaves a log behind\n"
+        "  --stratum-debug               log every raw pool message. Off by default: those\n"
+        "                                lines carry a full 476-hex pre_pow per job and are\n"
+        "                                only useful when diagnosing the protocol itself\n"
         "  --api-port <port>             HTTP monitoring API on 127.0.0.1 (default 4068, 0 = off)\n"
         "  --api-bind-all                expose the API on all interfaces (not just loopback)\n"
         "  --bench-seconds <s>           run the solver without a pool for s seconds\n"
@@ -194,6 +198,7 @@ void apply_setting(Config& c, const std::string& key, const std::string& value) 
     else if (key == "fan") c.fan_percent = (int)num();
     else if (key == "report") c.report_seconds = std::strtod(value.c_str(), nullptr);
     else if (key == "log-file") c.log_file = value;
+    else if (key == "stratum-debug") c.stratum_debug = true;
     else if (key == "api-port") c.api_port = (uint16_t)num();
     else if (key == "api-bind-all") c.api_bind_all = (num() != 0);
     else if (key == "bench-seconds") c.bench_seconds = std::strtod(value.c_str(), nullptr);
@@ -255,6 +260,7 @@ bool parse_args(Config& c, int argc, char** argv) {
         else if (a == "--fan") c.fan_percent = std::atoi(next("--fan"));
         else if (a == "--report") c.report_seconds = std::strtod(next("--report"), nullptr);
         else if (a == "--log-file") c.log_file = next("--log-file");
+        else if (a == "--stratum-debug") c.stratum_debug = true;
         else if (a == "--api-port") c.api_port = (uint16_t)std::strtoul(next("--api-port"), nullptr, 10);
         else if (a == "--api-bind-all") c.api_bind_all = true;
         else if (a == "--bench-seconds") c.bench_seconds = std::strtod(next("--bench-seconds"), nullptr);
@@ -341,6 +347,7 @@ std::string col(const char* code, const std::string& text) {
 // Optional append-only log file. Running with a visible window must not cost us the log,
 // so every line printed to the console is written here as well.
 std::FILE* g_log_sink = nullptr;
+bool g_stratum_debug = false;   // when false, raw pool messages are dropped from the output
 
 void log_sink_open(const std::string& path) {
     if (path.empty()) return;
@@ -417,6 +424,11 @@ void dashboard_clear() {
 }
 
 void log_line(const std::string& s) {
+    // Raw pool traffic is dropped unless explicitly asked for. Each job message carries the
+    // whole 476-hex pre_pow, so these lines dominate the log by size while telling the operator
+    // nothing the summarised "job height=... job_id=..." line does not; they earn their place
+    // only when the protocol itself is under investigation.
+    if (!g_stratum_debug && s.find("recv:") != std::string::npos) return;
     // Timestamps are not cosmetic here: the pool drops the connection every couple
     // of minutes and a share submitted just before a drop never gets a response, so
     // correlating submits with drops is the only way to tell those apart.
@@ -549,6 +561,7 @@ int main(int argc, char** argv) {
 
     log_sink_open(cfg.log_file);
     g_color = enable_console_colors();
+    g_stratum_debug = cfg.stratum_debug;
 
     // Startup banner, presented the way GPU miners usually are: a configuration block first,
     // then a timestamped log. Everything here is known before the solver is created, so a
