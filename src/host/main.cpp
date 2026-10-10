@@ -445,12 +445,18 @@ void log_line(const std::string& s) {
     //   * the job height / job id lines, which are bookkeeping for the miner and the pool.
     // Both are one flag away, because they were essential while the protocol was being
     // reverse-engineered and will be again the next time a rejection has to be explained.
-    // The pool closes the session on its own timer. Measured on 2miners: 23 closes over a session,
-    // median interval 120 s, and 12 of 23 landing in a 10-second window, which is a timer rather
-    // than a failing link. The miner reconnects immediately and keeps mining, so a line per event
-    // is noise - but the RATE is worth watching, because a change in it would matter. Counted and
-    // reported in the session footer instead of logged per event; --stratum-debug restores the
-    // individual lines.
+    // The pool closes the session from its side; the miner reconnects immediately and keeps mining,
+    // so a line per event is noise - but the RATE is worth watching, because a change in it would
+    // matter. Counted and reported in the session footer; --stratum-debug restores the lines.
+    //
+    // A correction is recorded here because the first version of this comment claimed the closes
+    // were a server-side timer firing every ~120 s. That was wrong, and it was stated with more
+    // confidence than the evidence carried: a histogram can show that a pattern exists, not what
+    // causes it. What the data actually supports: the churn was real over one period and then
+    // stopped completely (1 close in a 1.5-hour session afterwards); 11 of 12 submits in that
+    // session were answered "accepted", so submitting does not close the session; and the single
+    // close we caught arrived 80 ms after a submit, which is coincidence-level evidence rather
+    // than a mechanism.
     if (s.find("closed by the peer") != std::string::npos) {
         ++g_reconnects;
         if (!g_stratum_debug) return;
