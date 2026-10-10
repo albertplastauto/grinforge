@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# GrinForge - GRIN Cuckatoo32 GPU miner, open source, no developer fee.
+# Copyright (c) 2026 albertplastauto
+# SPDX-License-Identifier: MIT
+#
+# (This file was the one place the header pass missed: it looks for the copyright string, and
+# this script contains it as a literal, so the check passed while the file itself had no header.)
 """Insert authorship/SPDX headers into GrinForge's own files.
 
 Separate from the licence split already recorded in LICENSE and docs/third-party.md:

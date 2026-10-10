@@ -25,6 +25,19 @@ miners.
 | lolMiner 1.98a | does not start | — | — |
 | **GrinForge** | 0.055 GPS local / **0.07 GPS per the pool** | ~70 W | **yes** |
 
+![GrinForge dashboard](docs/dashboard.png)
+
+*Rendered from the miner's own console output (`tools/make_assets.py`): a configuration banner, two
+live tables and a session footer, repainted in place with colour that carries meaning — green
+healthy, yellow look, red act — while the same lines are appended to a log file.*
+
+### Works out of the box
+
+Unpack, put your wallet address in `wallet.txt`, then run `run-miner-visible.bat` for a window or
+`run-miner-forever.bat` for an unattended run. No pool account, no registration, no configuration
+language to learn, and no developer fee at any point. The miner says what it is doing, refuses to
+start if the wallet does not match the allowlist, and never asks for administrator rights.
+
 Be realistic about the numbers: on an 8 GB card only the *lean* solver fits (the fast
 *mean* solver needs 20–33 GB), so a few hundredths of a GPS is the ceiling here. Widely
 quoted figures such as "RTX 4060 Ti ≈ 0.65 H/s" are not reachable on 8 GB. GRIN is
